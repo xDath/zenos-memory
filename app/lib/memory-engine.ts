@@ -287,8 +287,7 @@ export class MemoryEngine {
     return agents.filter(m => m.type === "agent").map(m => ({ agentId: m.metadata.agentId, name: m.content, config: m.metadata }));
   }
   async indexFile(content, filename, namespace = "default") {
-    const lines = content.split("
-").filter(l => l.trim());
+    const lines = content.split("\n").filter(l => l.trim());
     const res = [];
     for (const line of lines.slice(0,5)) {
       res.push(await this.remember({ content: line, type: "file", namespace, metadata: { source: "file:" + filename } }));
