@@ -320,6 +320,12 @@ export class MemoryEngine {
     return await this.getRelationshipGraph(ns);
   }
 
+  async memoryHealthCheck(namespace = "default") {
+    const ms = await this.loadMemories(namespace);
+    const bad = ms.filter(m => this.computeQualityScore(m) < 0.4);
+    return { total: ms.length, unhealthy: bad.length, items: bad.map(m => ({id: m.id, q: this.computeQualityScore(m)})) };
+  }
+
 }
 
 // Singleton
