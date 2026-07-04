@@ -1,26 +1,31 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
+import { getMemoryEngine } from '../../../lib/memory-engine';
+import { productionReadiness } from '../../../lib/advanced-memory';
 
 export async function POST(request: NextRequest) {
   if (!validateApiKey(request)) return unauthorizedResponse();
 
-  const body = await request.json().catch(() => ({}));
-  const testType = body.test || 'smoke';
+  try {
+    const body = await request.json().catch(() => ({}));
+    const namespace = body.namespace || 'zenos';
+    const engine = getMemoryEngine();
+    const memories = await engine.recall({ query: '', namespace, limit: 500, include_low_quality: true, include_secrets: true });
+    const readiness = productionReadiness(memories);
 
-  // Basic smoke eval for the 13 features
-  const results = {
-    smoke: {
-      compact_structured: 'PASS (LLM handoff with blocks)',
-      bootstrap_recovery: 'PASS (prioritizes compacts)',
-      llm_extraction: 'PASS (DeepSeek via router)',
-      auto_trigger: 'PASS (plugin every 20 turns)',
-      drive_ownership: 'PASS (OAuth)',
-      temporal: 'BASIC (in blocks)',
-      vector: 'BASIC (hybrid)',
-      lock: 'STUB (optimistic)',
-    },
-    score: 'Phase 1-5 core: 85% (advanced features live, full vector/graph pending)',
-  };
-
-  return NextResponse.json({ success: true, test: testType, results });
+    return NextResponse.json({
+      success: true,
+      namespace,
+      test: body.test || 'advanced-readiness',
+      readiness,
+      features: {
+        compact_structured: readiness.evals.find(e => e.name === 'structured_compaction')?.status || 'unknown',
+        temporal_graph: readiness.evals.find(e => e.name === 'temporal_graph_density')?.status || 'unknown',
+        vector_search: readiness.evals.find(e => e.name === 'vector_readiness')?.status || 'unknown',
+        credential_awareness: readiness.evals.find(e => e.name === 'credential_awareness')?.status || 'unknown',
+      },
+    });
+  } catch (error: any) {
+    return NextResponse.json({ success: false, error: error.message || String(error) }, { status: 500 });
+  }
 }
