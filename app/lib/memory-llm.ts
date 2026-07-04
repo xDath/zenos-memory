@@ -61,7 +61,6 @@ async function callModel(model: string, messages: Array<{ role: string; content:
     const data = JSON.parse(raw);
     content = data?.choices?.[0]?.message?.content || '';
   } catch {
-    // Some local/router models may return SSE chunks or malformed reasoning wrappers.
     const chunks = raw
       .split('\n')
       .map(line => line.trim())
@@ -119,7 +118,14 @@ export async function extractWithLLM(text: string): Promise<MemoryLLMResult> {
   return callMemoryLLM([
     {
       role: 'system',
-      content: 'You are Zenos Memory extraction worker. Return JSON only with keys: facts, preferences, decisions, tasks, questions, artifacts, entities, summary. Keep it concise and faithful. Do not include secrets.',
+      content: `You are Zenos Memory extraction worker. 
+Return ONLY valid JSON with these keys: facts, preferences, decisions, tasks, questions, artifacts, entities, contradictions, credentials.
+
+For "credentials": if you detect any API key, token, password, or secret, put them here as array of objects:
+[{"service": "vercel", "key": "the-actual-key-or-token", "description": "short desc"}]
+
+Be extremely careful with secrets - only extract if clearly an API key/token.
+Do not invent. Be faithful to the text.`,
     },
     { role: 'user', content: text.slice(0, 16000) },
   ]);
@@ -129,7 +135,23 @@ export async function compactWithLLM(text: string): Promise<MemoryLLMResult> {
   return callMemoryLLM([
     {
       role: 'system',
-      content: 'You are Zenos Memory compaction worker. Create a structured handoff JSON only: current_goal, active_state, key_decisions, user_preferences, important_facts, completed_work, pending_work, blockers, files_artifacts, recovery_instructions. Be concise and faithful. Do not include secrets.',
+      content: `You are Zenos Memory compaction worker for structured handoff.
+Return ONLY valid JSON with:
+{
+  "current_goal": "...",
+  "active_state": "...",
+  "key_decisions": ["..."],
+  "user_preferences": {...},
+  "important_facts": ["..."],
+  "completed_work": ["..."],
+  "pending_work": ["..."],
+  "blockers": ["..."],
+  "files_artifacts": ["..."],
+  "recovery_instructions": "...",
+  "credentials": [{"service": "...", "key": "...", "description": "..."}]   // if any API keys/tokens are mentioned
+}
+
+Preserve any credentials mentioned. Do not leak them elsewhere.`,
     },
     { role: 'user', content: text.slice(0, 24000) },
   ]);

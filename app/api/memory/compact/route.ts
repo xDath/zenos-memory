@@ -18,7 +18,6 @@ export async function POST(request: NextRequest) {
       }, { status: 500 });
     }
 
-    // Build full conversation text for LLM
     const conversationText = req.messages
       .map((m: any) => `${m.role}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`)
       .join('\n\n')
@@ -34,8 +33,10 @@ export async function POST(request: NextRequest) {
     }
 
     const parsed = llmResult.parsed;
+    const engine = getMemoryEngine();
+    const namespace = req.namespace || 'zenos';
 
-    // Build advanced structured handoff
+    // Store the main structured handoff as insight
     const compactResult = {
       content: llmResult.content,
       type: 'insight' as const,
@@ -53,25 +54,45 @@ export async function POST(request: NextRequest) {
           approx_tokens: req.approx_tokens,
           reason: req.reason,
         },
-        blocks: parsed, // full structured blocks
+        blocks: parsed,
       },
     };
 
-    // Save to Drive
-    const engine = getMemoryEngine();
     await engine.remember({
       content: compactResult.content,
       type: 'insight',
-      namespace: req.namespace || 'zenos',
+      namespace,
       metadata: compactResult.metadata,
     });
+
+    // Automatically store any extracted credentials as separate 'credential' memories
+    if (parsed.credentials && Array.isArray(parsed.credentials)) {
+      for (const cred of parsed.credentials) {
+        if (cred.service && cred.key) {
+          await engine.remember({
+            content: cred.key,
+            type: 'credential',
+            namespace,
+            metadata: {
+              credential_for: cred.service,
+              description: cred.description || '',
+              is_secret: true,
+              source: 'llm-extracted-from-compact',
+              importance: 9,
+              confidence: 0.95,
+            },
+          });
+        }
+      }
+    }
 
     return NextResponse.json({ 
       success: true, 
       compact: compactResult,
       used_llm: true,
       model: llmResult.model,
-      structured_blocks: parsed
+      structured_blocks: parsed,
+      credentials_stored: parsed.credentials ? parsed.credentials.length : 0
     });
 
   } catch (error: any) {

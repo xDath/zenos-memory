@@ -12,6 +12,7 @@ export const MemoryTypeSchema = z.enum([
   'user_profile',
   'conversation',
   'procedure',
+  'credential',
   'custom'
 ]);
 
@@ -29,12 +30,16 @@ export const MemoryMetadataSchema = z.object({
   expires_at: z.string().datetime().optional(),
   importance: z.number().min(0).max(10).default(5),
   related_ids: z.array(z.string()).default([]),
-  // Tier-up fields: closer to Mem0/Zep/Letta style memory lifecycle.
+  // Tier-up fields
   entities: z.array(z.string()).default([]),
   contradictions: z.array(z.string()).default([]),
   supersedes_ids: z.array(z.string()).default([]),
   access_count: z.number().int().nonnegative().default(0),
   last_accessed_at: z.string().datetime().optional(),
+  // Credential specific
+  is_secret: z.boolean().default(false),
+  credential_for: z.string().optional(), // e.g. "vercel", "openai", "github"
+  redacted: z.boolean().default(false), // whether the content is redacted in some views
 });
 
 export const MemorySchema = z.object({
@@ -69,6 +74,7 @@ export const RecallRequestSchema = z.object({
   created_after: z.string().datetime().optional(),
   created_before: z.string().datetime().optional(),
   include_low_quality: z.boolean().optional().default(false),
+  include_secrets: z.boolean().optional().default(false), // special flag for credential queries
 });
 
 export const EditRequestSchema = z.object({
