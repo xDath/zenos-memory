@@ -47,17 +47,46 @@ async function callModel(model: string, messages: Array<{ role: string; content:
       model,
       messages,
       temperature: 0.15,
-      max_tokens: 1200,
+      max_tokens: 1600,
+      stream: false,
+      response_format: { type: 'json_object' },
     }),
   });
 
   const raw = await res.text();
   if (!res.ok) return { ok: false, model, error: `HTTP ${res.status}: ${raw.slice(0, 800)}` };
 
-  let data: any;
-  try { data = JSON.parse(raw); } catch { return { ok: false, model, error: `Invalid JSON response: ${raw.slice(0, 500)}` }; }
+  let content = '';
+  try {
+    const data = JSON.parse(raw);
+    content = data?.choices?.[0]?.message?.content || '';
+  } catch {
+    // Some local/router models may return SSE chunks or malformed reasoning wrappers.
+    const chunks = raw
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line.startsWith('data: '))
+      .map(line => line.slice(6))
+      .filter(line => line && line !== '[DONE]');
+    const parts: string[] = [];
+    for (const chunk of chunks) {
+      try {
+        const data = JSON.parse(chunk);
+        const delta = data?.choices?.[0]?.delta?.content || data?.choices?.[0]?.message?.content || '';
+        if (delta) parts.push(delta);
+      } catch {}
+    }
+    content = parts.join('');
 
-  const content = data?.choices?.[0]?.message?.content || '';
+    if (!content) {
+      const match = raw.match(/\"content\"\s*:\s*\"((?:\\\\.|[^\"\\\\])*)\"/);
+      if (match) {
+        try { content = JSON.parse(`"${match[1]}"`); } catch { content = match[1]; }
+      }
+    }
+  }
+
+  if (!content) return { ok: false, model, error: `No content in LLM response: ${raw.slice(0, 500)}` };
   return { ok: true, model, content, parsed: safeJsonParse(content) };
 }
 
