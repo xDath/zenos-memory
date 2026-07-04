@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { verifyEtlaSignature, issueEtlaToken, unauthorizedResponse } from '../../../lib/auth';
+import { verifyEtlaSignature, issueEtlaToken, unauthorizedResponse } from '../../lib/auth';
 
 export async function POST(request: NextRequest) {
   const etlaSecret = process.env.ETLA_MASTER_SECRET;

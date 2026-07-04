@@ -26,7 +26,7 @@ export function validateApiKey(request: Request): boolean {
   return providedKey === apiKey;
 }
 
-function verifyEtlaSignature(request: Request, secret: string): boolean {
+export function verifyEtlaSignature(request: Request, secret: string): boolean {
   const ts = request.headers.get('x-etla-timestamp') || '';
   const sig = request.headers.get('x-etla-signature') || '';
 
@@ -62,7 +62,7 @@ function verifyEtlaSignature(request: Request, secret: string): boolean {
   }
 }
 
-function verifyEtlaToken(token: string, secret: string): boolean {
+export function verifyEtlaToken(token: string, secret: string): boolean {
   const parts = token.split('.');
   if (parts.length !== 2) return false;
 
