@@ -16,6 +16,17 @@ export async function POST(request: NextRequest) {
     const engine = getMemoryEngine();
     const byId = new Map<string, Memory>();
 
+    // Prioritize recent compacts/insights for structured handoff (Phase 2)
+    try {
+      const compacts = await engine.recall({
+        query: "compact handoff bootstrap recovery structured",
+        namespace: parsed.namespace,
+        limit: 3,
+        type: "insight",
+      });
+      for (const mem of compacts) byId.set(mem.id, mem);
+    } catch {}
+
     for (const query of defaultBootstrapQueries(parsed.queries)) {
       const results = await engine.recall({
         query,

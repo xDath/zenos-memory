@@ -239,6 +239,9 @@ export class MemoryEngine {
     if (req.tags?.length) memories = memories.filter(m => req.tags!.some(tag => m.metadata.tags.includes(tag)));
     if (req.created_after) memories = memories.filter(m => new Date(m.created_at).getTime() >= new Date(req.created_after!).getTime());
     if (req.created_before) memories = memories.filter(m => new Date(m.created_at).getTime() <= new Date(req.created_before!).getTime());
+    if (!req.include_secrets) {
+      memories = memories.filter(m => !((m.metadata as any).is_secret));
+    }
 
     const scored = memories.map(memory => {
       const quality = this.computeQualityScore(memory);
