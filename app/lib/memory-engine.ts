@@ -39,14 +39,14 @@ export class MemoryEngine {
   }
 
   private async loadMemories(namespace?: string): Promise<Memory[]> {
-    const all = await this.store.readAll();
+    const all = await this.store.readAll(namespace);
     const normalized = (Array.isArray(all) ? all : []).filter((m: any) => m && m.id && m.content);
     if (namespace) return normalized.filter((m: any) => m.namespace === namespace);
     return normalized;
   }
 
-  private async saveMemories(memories: Memory[]): Promise<void> {
-    await this.store.writeAll(memories);
+  private async saveMemories(memories: Memory[], namespace?: string): Promise<void> {
+    await this.store.writeAll(memories, namespace || memories[0]?.namespace || 'zenos');
   }
 
   private tokenize(text: string): string[] {
@@ -123,6 +123,31 @@ export class MemoryEngine {
     return [...tags];
   }
 
+  private extractEntities(content: string): string[] {
+    const candidates = content.match(/\b[A-Z][a-zA-Z0-9_-]{2,}\b/g) || [];
+    const domain = this.tokenize(content).filter(t => ['zenos', 'etla', 'vercel', 'github', 'drive', 'memory', 'mem0', 'memanto'].includes(t));
+    return [...new Set([...candidates, ...domain])].slice(0, 12);
+  }
+
+  private extractFacts(content: string): RememberRequest[] {
+    const pieces = content
+      .split(/\n+|(?<=[.!?])\s+/)
+      .map(p => p.trim())
+      .filter(p => p.length > 12)
+      .slice(0, 8);
+
+    return pieces.map(piece => ({
+      content: piece,
+      type: this.inferType(piece),
+      metadata: {
+        confidence: /\b(always|never|must|harus|jangan|prefer|suka|hate|love)\b/i.test(piece) ? 0.88 : 0.72,
+        importance: /\b(project|deploy|secret|auth|security|prefer|suka|jangan)\b/i.test(piece) ? 8 : 5,
+        tags: [],
+        entities: this.extractEntities(piece),
+      },
+    }));
+  }
+
   private async findDuplicate(content: string, namespace: string, memories: Memory[]): Promise<Memory | null> {
     let best: { memory: Memory; similarity: number } | null = null;
     for (const memory of memories.filter(m => m.namespace === namespace)) {
@@ -154,6 +179,7 @@ export class MemoryEngine {
     const metadata = MemoryMetadataSchema.parse({
       ...req.metadata,
       tags: this.normalizeTags([...(req.metadata?.tags || []), ...(await this.autoTag(req.content))]),
+      entities: [...new Set([...(req.metadata?.entities || []), ...this.extractEntities(req.content)])],
       timestamp: now,
     });
 
@@ -168,7 +194,7 @@ export class MemoryEngine {
     };
 
     all.push(newMemory);
-    await this.saveMemories(all as Memory[]);
+    await this.saveMemories(all as Memory[], newMemory.namespace);
     return newMemory;
   }
 
@@ -179,18 +205,21 @@ export class MemoryEngine {
   }
 
   async rememberFromConversation(conversation: Array<{ role: string; content: string }>, namespace = 'default', conversationId?: string): Promise<Memory[]> {
-    const candidates = conversation
-      .filter(turn => turn.content && ['user', 'assistant'].includes(turn.role))
-      .map(turn => ({
-        content: `${turn.role}: ${turn.content}`,
-        type: this.inferType(turn.content),
-        namespace,
-        metadata: {
-          source: conversationId ? `conversation:${conversationId}` : 'conversation',
-          provenance: { conversation_id: conversationId },
-          importance: turn.role === 'user' ? 7 : 5,
-        },
-      } as RememberRequest));
+    const candidates: RememberRequest[] = [];
+    for (const turn of conversation.filter(t => t.content && ['user', 'assistant'].includes(t.role))) {
+      for (const fact of this.extractFacts(turn.content)) {
+        candidates.push({
+          ...fact,
+          namespace,
+          metadata: {
+            ...fact.metadata,
+            source: conversationId ? `conversation:${conversationId}` : 'conversation',
+            provenance: { conversation_id: conversationId },
+            importance: Math.max(fact.metadata?.importance || 5, turn.role === 'user' ? 7 : 5),
+          },
+        });
+      }
+    }
     return this.rememberBatch(candidates);
   }
 
@@ -223,10 +252,29 @@ export class MemoryEngine {
       return { ...memory, quality, score, reason };
     });
 
-    return scored
-      .filter(m => m.score! > 0 || query.trim() === '')
+    const top = scored
+      .filter(m => req.include_low_quality || m.score! > 0 || query.trim() === '')
       .sort((a, b) => (b.score || 0) - (a.score || 0))
       .slice(0, req.limit || 10);
+
+    // Lightweight usage tracking improves future quality scores without blocking recall on failures.
+    void this.touchMemories(top.map(m => m.id), req.namespace).catch(() => undefined);
+    return top;
+  }
+
+  private async touchMemories(ids: string[], namespace?: string): Promise<void> {
+    if (!ids.length) return;
+    const all = await this.store.readAll();
+    const now = new Date().toISOString();
+    let changed = false;
+    for (const memory of all as Memory[]) {
+      if (ids.includes(memory.id) && (!namespace || memory.namespace === namespace)) {
+        memory.metadata.access_count = (memory.metadata.access_count || 0) + 1;
+        memory.metadata.last_accessed_at = now;
+        changed = true;
+      }
+    }
+    if (changed) await this.saveMemories(all as Memory[], namespace);
   }
 
   private recencyScore(memory: Memory): number {
@@ -241,7 +289,8 @@ export class MemoryEngine {
     const tagScore = Math.min((memory.metadata.tags?.length || 0) / 5, 1);
     const relationScore = Math.min((memory.metadata.related_ids?.length || 0) / 3, 1);
     const lengthScore = memory.content.length < 12 ? 0.2 : memory.content.length > 4000 ? 0.6 : 1;
-    const quality = (confidence * 0.28) + (importance * 0.25) + (recency * 0.18) + (tagScore * 0.12) + (relationScore * 0.07) + (lengthScore * 0.10);
+    const accessScore = Math.min((memory.metadata.access_count || 0) / 10, 1);
+    const quality = (confidence * 0.25) + (importance * 0.25) + (recency * 0.18) + (tagScore * 0.12) + (relationScore * 0.07) + (lengthScore * 0.08) + (accessScore * 0.05);
     return Math.min(Math.max(quality, 0), 1);
   }
 
@@ -281,7 +330,7 @@ export class MemoryEngine {
     };
 
     all[idx] = updated;
-    await this.saveMemories(all as Memory[]);
+    await this.saveMemories(all as Memory[], updated.namespace);
     return updated;
   }
 
@@ -289,7 +338,7 @@ export class MemoryEngine {
     const all = await this.store.readAll();
     const filtered = (all as Memory[]).filter(m => !(m.id === id && (!namespace || m.namespace === namespace)));
     if (filtered.length === all.length) return false;
-    await this.saveMemories(filtered);
+    await this.saveMemories(filtered, namespace || all[0]?.namespace);
     return true;
   }
 
@@ -313,7 +362,7 @@ export class MemoryEngine {
     const memory = all[idx] as Memory;
     memory.metadata.tags = this.normalizeTags([...(memory.metadata.tags || []), ...(await this.autoTag(memory.content))]);
     memory.updated_at = new Date().toISOString();
-    await this.saveMemories(all as Memory[]);
+    await this.saveMemories(all as Memory[], memory.namespace);
     return memory;
   }
 
@@ -328,7 +377,7 @@ export class MemoryEngine {
     if (!b.metadata.related_ids.includes(id1)) b.metadata.related_ids.push(id1);
     a.updated_at = new Date().toISOString();
     b.updated_at = a.updated_at;
-    await this.saveMemories(all as Memory[]);
+    await this.saveMemories(all as Memory[], namespace);
     return true;
   }
 
@@ -344,7 +393,7 @@ export class MemoryEngine {
       memory.updated_at = new Date().toISOString();
       updated++;
     }
-    if (updated) await this.saveMemories(all as Memory[]);
+    if (updated) await this.saveMemories(all as Memory[], updated.namespace);
     return updated;
   }
 
@@ -354,20 +403,24 @@ export class MemoryEngine {
 
     const byType: Record<string, number> = {};
     const tagCounts: Record<string, number> = {};
+    const entityCounts: Record<string, number> = {};
     memories.forEach(m => {
       byType[m.type] = (byType[m.type] || 0) + 1;
       m.metadata.tags.forEach(tag => { tagCounts[tag] = (tagCounts[tag] || 0) + 1; });
+      (m.metadata.entities || []).forEach(entity => { entityCounts[entity] = (entityCounts[entity] || 0) + 1; });
     });
     const avgQuality = memories.reduce((s, m) => s + this.computeQualityScore(m), 0) / memories.length;
     const topTags = Object.entries(tagCounts).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([tag]) => tag);
+    const topEntities = Object.entries(entityCounts).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([entity]) => entity);
     const unhealthy = memories.filter(m => this.computeQualityScore(m) < 0.4).length;
     const insights = [
       `Top type: ${Object.entries(byType).sort((a, b) => b[1] - a[1])[0]?.[0] || 'none'}`,
       `Avg quality: ${avgQuality.toFixed(2)}`,
       ...(topTags.length ? [`Top tags: ${topTags.join(', ')}`] : []),
+      ...(topEntities.length ? [`Top entities: ${topEntities.join(', ')}`] : []),
       ...(unhealthy ? [`${unhealthy} memories need review`] : ['Memory health looks good']),
     ];
-    return { summary: `${memories.length} memories in ${namespace}, avg quality ${avgQuality.toFixed(2)}`, insights, health: { total: memories.length, avgQuality, unhealthy, byType, topTags } };
+    return { summary: `${memories.length} memories in ${namespace}, avg quality ${avgQuality.toFixed(2)}`, insights, health: { total: memories.length, avgQuality, unhealthy, byType, topTags, topEntities } };
   }
 
   async resolveConflict(id1: string, id2: string, namespace?: string) {
@@ -446,7 +499,7 @@ export class MemoryEngine {
     const all = await this.store.readAll();
     const ts = new Date().toISOString();
     const copies = (all as Memory[]).map(m => ({ ...m, id: uuidv4(), namespace: targetNamespace, metadata: { ...m.metadata, source: `backup:${m.namespace}`, timestamp: ts } }));
-    await this.saveMemories([...(all as Memory[]), ...copies]);
+    await this.saveMemories([...(all as Memory[]), ...copies], targetNamespace);
     return { backed_up: copies.length, target: targetNamespace };
   }
 

@@ -15,7 +15,8 @@ export const CompactRequestSchema = z.object({
   approx_tokens: z.number().int().positive().optional(),
   session_id: z.string().optional(),
   conversation_id: z.string().optional(),
-  max_chars: z.number().int().positive().max(20000).optional().default(8000),
+  max_chars: z.number().int().positive().max(24000).optional().default(10000),
+  mode: z.enum(['deterministic', 'advanced', 'dag']).optional().default('dag'),
 });
 
 export const BootstrapRequestSchema = z.object({
@@ -35,7 +36,7 @@ const DEFAULT_BOOTSTRAP_QUERIES = [
   'gass langsung no questions execution style keep hermes base zenos memory',
 ];
 
-function normalizeContent(content: unknown): string {
+export function normalizeContent(content: unknown): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
     return content.map((part) => {
@@ -137,53 +138,70 @@ export interface AdvancedCompactResult {
     decisions: string[];
     questions: string[];
     topics: string[];
+    artifacts?: string[];
+    timeline?: string[];
+    working_pack?: string[];
+    topic_archives?: Record<string, string[]>;
+    compaction_nodes?: Array<{ id: string; level: number; topic: string; summary: string; source_range: [number, number] }>;
   };
 }
 
-function extractBlocks(messages: CompactRequest['messages'], maxPerBlock = 6) {
+const TOPIC_PATTERNS: Array<[string, RegExp]> = [
+  ['batang-job-hunt', /\b(batang|job|loker|lamaran|interview|cv|kerja)\b/i],
+  ['pearl-mining', /\b(pearl|mining|prl|wallet|claim|airdrop)\b/i],
+  ['llm-dashboard', /\b(llm\.etla|valorant|combo|checker|dashboard)\b/i],
+  ['hermes-memory', /\b(hermes|zenos memory|compact|compression|context|reset|mem0|codex)\b/i],
+  ['captcha-solver', /\b(captcha|solver|turnstile|cloudflare)\b/i],
+  ['deployment', /\b(vercel|github|deploy|production|env|service)\b/i],
+];
+
+function uniquePush(list: string[], value: string, max: number, clip = 220) {
+  const clean = value.replace(/\s+/g, ' ').trim();
+  if (!clean) return;
+  const clipped = clean.length > clip ? clean.slice(0, clip - 3) + '...' : clean;
+  const key = clipped.toLowerCase().slice(0, 140);
+  if (!list.some(x => x.toLowerCase().slice(0, 140) === key) && list.length < max) list.push(clipped);
+}
+
+function inferTopics(messages: CompactRequest['messages']) {
+  const scores = new Map<string, number>();
+  for (const msg of messages.slice(-120)) {
+    const text = normalizeContent(msg.content);
+    for (const [topic, re] of TOPIC_PATTERNS) {
+      if (re.test(text)) scores.set(topic, (scores.get(topic) || 0) + (msg.role === 'user' ? 3 : 1));
+    }
+  }
+  return Array.from(scores.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([topic]) => topic);
+}
+
+function extractBlocks(messages: CompactRequest['messages'], maxPerBlock = 8) {
   const facts: string[] = [];
   const tasks: string[] = [];
   const decisions: string[] = [];
   const questions: string[] = [];
-  const topics = new Set<string>();
+  const artifacts: string[] = [];
+  const timeline: string[] = [];
+  const topics = inferTopics(messages);
 
-  const lower = (s: string) => s.toLowerCase();
-
-  for (const msg of messages.slice(-60)) {
+  for (const msg of messages.slice(-120)) {
+    const role = String(msg.role || 'unknown');
     const text = normalizeContent(msg.content);
-    if (!text || text.length < 12) continue;
+    if (!text || text.length < 10) continue;
+    const t = text.toLowerCase();
 
-    const t = lower(text);
+    if (role === 'user') uniquePush(timeline, `User: ${text}`, 10, 180);
+    if (role === 'assistant' && /(done|implemented|fixed|created|updated|deployed|tested|sukses|selesai)/i.test(text)) {
+      uniquePush(timeline, `Assistant: ${text}`, 10, 180);
+    }
 
-    // Topics (simple keyword detection)
-    if (t.includes('batang') || t.includes('job') || t.includes('loker')) topics.add('batang-job-hunt');
-    if (t.includes('pearl') || t.includes('mining') || t.includes('prl')) topics.add('pearl-mining');
-    if (t.includes('llm.etla') || t.includes('valorant') || t.includes('combo')) topics.add('llm-dashboard');
-    if (t.includes('hermes') || t.includes('zenos memory') || t.includes('compact')) topics.add('hermes-memory');
-    if (t.includes('captcha') || t.includes('solver')) topics.add('captcha-solver');
-
-    // Memory blocks
-    if ((t.includes('prefer') || t.includes('suka') || t.includes('always')) && facts.length < maxPerBlock) {
-      facts.push(text.slice(0, 180));
-    }
-    if ((t.includes('todo') || t.includes('harus') || t.includes('next') || t.includes('akan')) && tasks.length < maxPerBlock) {
-      tasks.push(text.slice(0, 160));
-    }
-    if ((t.includes('decide') || t.includes('putus') || t.includes('final') || t.includes('sudah')) && decisions.length < maxPerBlock) {
-      decisions.push(text.slice(0, 160));
-    }
-    if ((t.includes('?') || t.includes('belum') || t.includes('masih')) && questions.length < maxPerBlock) {
-      questions.push(text.slice(0, 140));
-    }
+    if (/(prefer|suka|always|jangan|harus|wants?|pengen|preference|style)/i.test(text)) uniquePush(facts, text, maxPerBlock, 240);
+    if (/(todo|next|lanjut|gass|fix|implement|deploy|push|test|bikin|tambahkan|upgrade)/i.test(text)) uniquePush(tasks, text, maxPerBlock, 220);
+    if (/(decided|final|sudah|done|selesai|approved|confirmed|pakai|gunakan|primary|fallback)/i.test(text)) uniquePush(decisions, text, maxPerBlock, 220);
+    if (/[?？]|(belum|masih|kenapa|gimana|apakah|bisa ga|cek sekalian)/i.test(text)) uniquePush(questions, text, maxPerBlock, 180);
+    if (/(\/root\/|app\/|api\/|\.ts|\.py|vercel|github|drive|folder|endpoint|env)/i.test(text)) uniquePush(artifacts, text, maxPerBlock, 220);
   }
 
-  return {
-    facts: facts.slice(0, maxPerBlock),
-    tasks: tasks.slice(0, maxPerBlock),
-    decisions: decisions.slice(0, maxPerBlock),
-    questions: questions.slice(0, maxPerBlock),
-    topics: Array.from(topics).slice(0, 8),
-  };
+  return { facts, tasks, decisions, questions, topics, artifacts, timeline };
 }
 
 export function buildAdvancedCompactSnapshot(req: CompactRequest): AdvancedCompactResult {
@@ -205,8 +223,10 @@ export function buildAdvancedCompactSnapshot(req: CompactRequest): AdvancedCompa
   if (blocks.tasks.length) sections.push('## Active Tasks\n' + blocks.tasks.map(t => `- ${t}`).join('\n'));
   if (blocks.decisions.length) sections.push('## Key Decisions\n' + blocks.decisions.map(d => `- ${d}`).join('\n'));
   if (blocks.questions.length) sections.push('## Open Questions\n' + blocks.questions.map(q => `- ${q}`).join('\n'));
+  if (blocks.artifacts?.length) sections.push('## Files / Endpoints / Artifacts\n' + blocks.artifacts.map(a => `- ${a}`).join('\n'));
+  if (blocks.timeline?.length) sections.push('## Recent Timeline\n' + blocks.timeline.map(t => `- ${t}`).join('\n'));
 
-  const content = [header, ...sections].join('\n\n').slice(0, maxChars);
+  const content = [header, 'Purpose: compact long context into active durable memory blocks while discarding low-signal chat history.', ...sections].join('\n\n').slice(0, maxChars);
 
   return {
     content,
@@ -226,8 +246,112 @@ export function buildAdvancedCompactSnapshot(req: CompactRequest): AdvancedCompa
       reason: req.reason,
       compact_strategy: 'advanced-structured-memory-blocks-v2',
       topics: blocks.topics,
+      block_counts: { facts: blocks.facts.length, tasks: blocks.tasks.length, decisions: blocks.decisions.length, questions: blocks.questions.length, artifacts: blocks.artifacts?.length || 0 },
     },
     blocks,
+  };
+}
+
+function chunkMessages(messages: CompactRequest['messages'], size = 12) {
+  const chunks: Array<{ start: number; end: number; messages: CompactRequest['messages'] }> = [];
+  for (let i = 0; i < messages.length; i += size) {
+    chunks.push({ start: i, end: Math.min(i + size - 1, messages.length - 1), messages: messages.slice(i, i + size) });
+  }
+  return chunks;
+}
+
+function summarizeChunk(chunk: { start: number; end: number; messages: CompactRequest['messages'] }, topicHint = 'general') {
+  const lines: string[] = [];
+  for (const msg of chunk.messages) {
+    const role = String(msg.role || 'unknown');
+    const text = normalizeContent(msg.content).replace(/\s+/g, ' ').trim();
+    if (!text) continue;
+    const important = /(gass|fix|implement|deploy|test|done|error|failed|decided|final|harus|pengen|context|compact|memory|github|vercel|drive)/i.test(text);
+    if (important || role === 'user') uniquePush(lines, `${role}: ${text}`, 8, 240);
+  }
+  return lines.length ? lines.join(' | ') : chunk.messages.map(m => normalizeContent(m.content)).join(' ').slice(0, 280);
+}
+
+function buildCompactionDag(messages: CompactRequest['messages']) {
+  const topics = inferTopics(messages);
+  const chunks = chunkMessages(messages.slice(-180), 12);
+  const leafNodes = chunks.map((chunk, idx) => {
+    const summary = summarizeChunk(chunk, topics[0] || 'general');
+    return {
+      id: `leaf-${idx + 1}`,
+      level: 0,
+      topic: topics[0] || 'general',
+      summary,
+      source_range: [chunk.start, chunk.end] as [number, number],
+    };
+  }).filter(n => n.summary.trim().length > 0);
+
+  const rootSummary = leafNodes.map(n => n.summary).join(' || ').slice(0, 1600);
+  const rootNode = {
+    id: 'root-working-pack',
+    level: 1,
+    topic: topics.join(',') || 'general',
+    summary: rootSummary,
+    source_range: [0, Math.max(0, messages.length - 1)] as [number, number],
+  };
+
+  return { topics, nodes: [...leafNodes.slice(-12), rootNode] };
+}
+
+export function buildDagCompactSnapshot(req: CompactRequest): AdvancedCompactResult {
+  const maxChars = req.max_chars || 10000;
+  const blocks = extractBlocks(req.messages, 10);
+  const dag = buildCompactionDag(req.messages);
+  const workingPack = [
+    ...(blocks.tasks || []).map(x => `Task: ${x}`),
+    ...(blocks.decisions || []).map(x => `Decision: ${x}`),
+    ...(blocks.facts || []).map(x => `Fact: ${x}`),
+    ...(blocks.artifacts || []).map(x => `Artifact: ${x}`),
+  ].slice(0, 18);
+
+  const topicArchives: Record<string, string[]> = {};
+  for (const topic of dag.topics.length ? dag.topics : ['general']) {
+    topicArchives[topic] = dag.nodes.filter(n => n.topic.includes(topic) || n.id === 'root-working-pack').map(n => n.summary).slice(0, 6);
+  }
+
+  const now = new Date().toISOString();
+  const sections = [
+    `Zenos Compaction DAG v3`,
+    `Created: ${now}`,
+    `Mode: dag`,
+    `Strategy: topic-aware-compaction-dag-working-pack-v3`,
+    `Approx tokens: ${req.approx_tokens || 'unknown'}`,
+    `Topics: ${(dag.topics.length ? dag.topics : ['general']).join(', ')}`,
+    req.session_id ? `Session: ${req.session_id}` : '',
+    '',
+    '## Working Pack (hot context to inject)',
+    ...(workingPack.length ? workingPack.map(x => `- ${x}`) : ['- No explicit hot items extracted; use DAG root summary.']),
+    '',
+    '## Topic Archives',
+    ...Object.entries(topicArchives).flatMap(([topic, summaries]) => [`### ${topic}`, ...summaries.map(s => `- ${s.slice(0, 360)}`)]),
+    '',
+    '## DAG Root Summary',
+    dag.nodes[dag.nodes.length - 1]?.summary || '',
+  ].filter(x => x !== undefined).join('\n').slice(0, maxChars);
+
+  return {
+    content: sections,
+    type: 'insight' as const,
+    metadata: {
+      source: 'zenos-memory-dag-compact',
+      confidence: 0.94,
+      importance: 10,
+      tags: ['dag-compact', 'working-pack', 'topic-archive', 'lossless-style', 'codex-plus'],
+      provenance: { session_id: req.session_id, conversation_id: req.conversation_id, created_by: 'zenos-memory-v3' },
+      approx_tokens: req.approx_tokens,
+      message_count: req.messages.length,
+      reason: req.reason,
+      compact_strategy: 'topic-aware-compaction-dag-working-pack-v3',
+      topics: dag.topics,
+      node_count: dag.nodes.length,
+      block_counts: { facts: blocks.facts.length, tasks: blocks.tasks.length, decisions: blocks.decisions.length, questions: blocks.questions.length, artifacts: blocks.artifacts?.length || 0 },
+    },
+    blocks: { ...blocks, working_pack: workingPack, topic_archives: topicArchives, compaction_nodes: dag.nodes },
   };
 }
 

@@ -10,6 +10,8 @@ export const MemoryTypeSchema = z.enum([
   'task',
   'project',
   'user_profile',
+  'conversation',
+  'procedure',
   'custom'
 ]);
 
@@ -27,6 +29,12 @@ export const MemoryMetadataSchema = z.object({
   expires_at: z.string().datetime().optional(),
   importance: z.number().min(0).max(10).default(5),
   related_ids: z.array(z.string()).default([]),
+  // Tier-up fields: closer to Mem0/Zep/Letta style memory lifecycle.
+  entities: z.array(z.string()).default([]),
+  contradictions: z.array(z.string()).default([]),
+  supersedes_ids: z.array(z.string()).default([]),
+  access_count: z.number().int().nonnegative().default(0),
+  last_accessed_at: z.string().datetime().optional(),
 });
 
 export const MemorySchema = z.object({
@@ -44,7 +52,6 @@ export type Memory = z.infer<typeof MemorySchema>;
 export type MemoryType = z.infer<typeof MemoryTypeSchema>;
 export type MemoryMetadata = z.infer<typeof MemoryMetadataSchema>;
 
-// Request schemas
 export const RememberRequestSchema = z.object({
   content: z.string().min(1),
   type: MemoryTypeSchema.optional().default('fact'),
@@ -53,14 +60,15 @@ export const RememberRequestSchema = z.object({
 });
 
 export const RecallRequestSchema = z.object({
-  query: z.string().min(1),
-  namespace: z.string().optional().default("default"),
+  query: z.string().default(''),
+  namespace: z.string().optional().default('default'),
   type: MemoryTypeSchema.optional(),
   limit: z.number().int().positive().max(50).default(10),
   min_confidence: z.number().min(0).max(1).optional(),
   tags: z.array(z.string()).optional(),
   created_after: z.string().datetime().optional(),
   created_before: z.string().datetime().optional(),
+  include_low_quality: z.boolean().optional().default(false),
 });
 
 export const EditRequestSchema = z.object({

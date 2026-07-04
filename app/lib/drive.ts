@@ -11,7 +11,7 @@ export class GoogleDriveMemoryStore {
   private drive: any;
   private rootFolderId: string;
   private memoriesFileName = 'zenos-memories.json';
-  private fileId: string | null = null;
+  private fileIds = new Map<string, string>();
 
   constructor(config: DriveConfig) {
     const auth = new google.auth.GoogleAuth({
@@ -47,10 +47,31 @@ export class GoogleDriveMemoryStore {
     return createRes.data.id;
   }
 
-  private async getOrCreateMemoriesFile(namespace = 'zenos'): Promise<string> {
-    if (this.fileId) return this.fileId;
+  private async ensureChildFolder(parentId: string, name: string): Promise<string> {
+    const res = await this.drive.files.list({
+      supportsAllDrives: true,
+      q: `name='${name}' and '${parentId}' in parents and trashed=false and mimeType='application/vnd.google-apps.folder'`,
+      fields: 'files(id)',
+      pageSize: 1,
+    });
+    if (res.data.files && res.data.files.length > 0) return res.data.files[0].id;
+    const createRes = await this.drive.files.create({
+      supportsAllDrives: true,
+      requestBody: { name, parents: [parentId], mimeType: 'application/vnd.google-apps.folder' },
+      fields: 'id',
+    });
+    return createRes.data.id;
+  }
 
-    const parentFolder = await this.ensureNamespaceFolder(namespace);
+  private async getOrCreateMemoriesFile(namespace = 'zenos'): Promise<string> {
+    const cached = this.fileIds.get(namespace);
+    if (cached) return cached;
+
+    const namespaceFolder = await this.ensureNamespaceFolder(namespace);
+    await this.ensureChildFolder(namespaceFolder, 'topics');
+    await this.ensureChildFolder(namespaceFolder, 'compactions');
+    await this.ensureChildFolder(namespaceFolder, 'indexes');
+    const parentFolder = await this.ensureChildFolder(namespaceFolder, 'memories');
 
     const res = await this.drive.files.list({
       supportsAllDrives: true,
@@ -60,8 +81,9 @@ export class GoogleDriveMemoryStore {
     });
 
     if (res.data.files && res.data.files.length > 0) {
-      this.fileId = res.data.files[0].id;
-      return this.fileId!;
+      const id = res.data.files[0].id;
+      this.fileIds.set(namespace, id);
+      return id;
     }
 
     const createRes = await this.drive.files.create({
@@ -77,8 +99,9 @@ export class GoogleDriveMemoryStore {
       },
       fields: 'id',
     });
-    this.fileId = createRes.data.id;
-    return this.fileId!;
+    const id = createRes.data.id;
+    this.fileIds.set(namespace, id);
+    return id;
   }
 
   async readAll(namespace?: string): Promise<any[]> {
@@ -158,32 +181,35 @@ export function createDriveStore(): GoogleDriveMemoryStore {
 
 // Local file fallback for development/testing
 export class LocalFileMemoryStore {
-  private filePath: string;
+  private dataDir: string;
 
   constructor() {
-    const dataDir = process.env.LOCAL_MEMORY_DIR || '/tmp/zenos-memory';
-    this.filePath = path.join(dataDir, 'memories.json');
+    this.dataDir = process.env.LOCAL_MEMORY_DIR || '/tmp/zenos-memory';
   }
 
-  private async ensureDir() {
-    const dir = path.dirname(this.filePath);
+  private filePath(namespace = 'zenos') {
+    return path.join(this.dataDir, `namespace-${namespace}`, 'memories', 'zenos-memories.json');
+  }
+
+  private async ensureDir(namespace = 'zenos') {
+    const dir = path.dirname(this.filePath(namespace));
     try {
       await fs.mkdir(dir, { recursive: true });
     } catch {}
   }
 
-  async readAll(): Promise<any[]> {
-    await this.ensureDir();
+  async readAll(namespace?: string): Promise<any[]> {
+    await this.ensureDir(namespace || 'zenos');
     try {
-      const data = await fs.readFile(this.filePath, 'utf8');
+      const data = await fs.readFile(this.filePath(namespace || 'zenos'), 'utf8');
       return JSON.parse(data);
     } catch {
       return [];
     }
   }
 
-  async writeAll(memories: any[]): Promise<void> {
-    await this.ensureDir();
-    await fs.writeFile(this.filePath, JSON.stringify(memories, null, 2));
+  async writeAll(memories: any[], namespace = 'zenos'): Promise<void> {
+    await this.ensureDir(namespace);
+    await fs.writeFile(this.filePath(namespace), JSON.stringify(memories, null, 2));
   }
 }
