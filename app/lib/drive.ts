@@ -9,7 +9,7 @@ interface DriveConfig {
 
 export class GoogleDriveMemoryStore {
   private drive: any;
-  private folderId: string;
+  private rootFolderId: string;
   private memoriesFileName = 'zenos-memories.json';
   private fileId: string | null = null;
 
@@ -19,66 +19,71 @@ export class GoogleDriveMemoryStore {
       scopes: ['https://www.googleapis.com/auth/drive.file', 'https://www.googleapis.com/auth/drive'],
     });
     this.drive = google.drive({ version: 'v3', auth });
-    this.folderId = config.folderId;
+    this.rootFolderId = config.folderId;
   }
 
-  private async getOrCreateMemoriesFile(): Promise<string> {
+  private async ensureNamespaceFolder(namespace: string): Promise<string> {
+    const folderName = `namespace-${namespace}`;
+    const res = await this.drive.files.list({
+      supportsAllDrives: true,
+      q: `name='${folderName}' and '${this.rootFolderId}' in parents and trashed=false and mimeType='application/vnd.google-apps.folder'`,
+      fields: 'files(id)',
+      pageSize: 1,
+    });
+
+    if (res.data.files && res.data.files.length > 0) {
+      return res.data.files[0].id;
+    }
+
+    const createRes = await this.drive.files.create({
+      supportsAllDrives: true,
+      requestBody: {
+        name: folderName,
+        parents: [this.rootFolderId],
+        mimeType: 'application/vnd.google-apps.folder',
+      },
+      fields: 'id',
+    });
+    return createRes.data.id;
+  }
+
+  private async getOrCreateMemoriesFile(namespace = 'zenos'): Promise<string> {
     if (this.fileId) return this.fileId;
 
-    try {
-      // Search for existing file
-      const res = await this.drive.files.list({
-        supportsAllDrives: true,
-        q: `name='${this.memoriesFileName}' and '${this.folderId}' in parents and trashed=false`,
-        fields: 'files(id, name)',
-        pageSize: 1,
-      });
+    const parentFolder = await this.ensureNamespaceFolder(namespace);
 
-      if (res.data.files && res.data.files.length > 0) {
-        this.fileId = res.data.files[0].id;
-        return this.fileId!;
-      }
+    const res = await this.drive.files.list({
+      supportsAllDrives: true,
+      q: `name='${this.memoriesFileName}' and '${parentFolder}' in parents and trashed=false`,
+      fields: 'files(id, name)',
+      pageSize: 1,
+    });
 
-      // Create new file (may fail due to quota on personal Drive)
-      try {
-        const createRes = await this.drive.files.create({
-          supportsAllDrives: true,
-          requestBody: {
-            name: this.memoriesFileName,
-            parents: [this.folderId],
-            mimeType: 'application/json',
-          },
-          media: {
-            mimeType: 'application/json',
-            body: JSON.stringify([]),
-          },
-          fields: 'id',
-        });
-        this.fileId = createRes.data.id;
-      } catch (createErr: any) {
-        console.error('Create failed (common on personal Drive):', createErr?.message);
-        throw new Error(
-          'Could not create memories file. Please manually create "zenos-memories.json" with content "[]" in the folder using your personal account, share the FILE (not just folder) with the service account as Editor, then retry.'
-        );
-      }
+    if (res.data.files && res.data.files.length > 0) {
+      this.fileId = res.data.files[0].id;
       return this.fileId!;
-    } catch (error: any) {
-      console.error('Drive file init error:', error?.message || error);
-      if (error?.message?.includes('quota') || error?.code === 403) {
-        throw new Error(
-          'Service Account quota error. ' +
-          'Please manually create a file named "zenos-memories.json" containing exactly "[]" (empty array) ' +
-          'inside your shared folder using the OWNER account, then share THAT FILE specifically with the service account (Editor). ' +
-          'After that, try again.'
-        );
-      }
-      throw new Error('Failed to initialize memories. Check service account sharing and Drive permissions: ' + (error?.message || error));
     }
+
+    const createRes = await this.drive.files.create({
+      supportsAllDrives: true,
+      requestBody: {
+        name: this.memoriesFileName,
+        parents: [parentFolder],
+        mimeType: 'application/json',
+      },
+      media: {
+        mimeType: 'application/json',
+        body: JSON.stringify([]),
+      },
+      fields: 'id',
+    });
+    this.fileId = createRes.data.id;
+    return this.fileId!;
   }
 
-  async readAll(): Promise<any[]> {
+  async readAll(namespace?: string): Promise<any[]> {
     try {
-      const fileId = await this.getOrCreateMemoriesFile();
+      const fileId = await this.getOrCreateMemoriesFile(namespace || 'zenos');
       const res = await this.drive.files.get({
         supportsAllDrives: true,
         fileId,
@@ -92,9 +97,9 @@ export class GoogleDriveMemoryStore {
     }
   }
 
-  async writeAll(memories: any[]): Promise<void> {
+  async writeAll(memories: any[], namespace = 'zenos'): Promise<void> {
     try {
-      const fileId = await this.getOrCreateMemoriesFile();
+      const fileId = await this.getOrCreateMemoriesFile(namespace);
       await this.drive.files.update({
         supportsAllDrives: true,
         fileId,
@@ -112,7 +117,7 @@ export class GoogleDriveMemoryStore {
   async listFilesInFolder(): Promise<any[]> {
     const res = await this.drive.files.list({
         supportsAllDrives: true,
-      q: `'${this.folderId}' in parents and trashed=false`,
+      q: `'${this.rootFolderId}' in parents and trashed=false`,
       fields: 'files(id, name, mimeType, createdTime)',
     });
     return res.data.files || [];
