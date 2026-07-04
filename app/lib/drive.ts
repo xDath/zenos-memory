@@ -204,9 +204,10 @@ export class GoogleDriveMemoryStore {
           body: JSON.stringify(value, null, 2),
         },
       });
-    } catch (error) {
+    } catch (error: any) {
       console.error(`Drive ${kind} write error:`, error);
-      throw new Error(`Failed to write ${kind}. Check OAuth/Drive permissions`);
+      const details = error?.errors ? JSON.stringify(error.errors) : (error?.message || String(error));
+      throw new Error(`Failed to write ${kind}. ${details}`);
     }
   }
 
