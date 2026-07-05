@@ -88,7 +88,7 @@ Public:
 
 ```bash
 curl -s https://zenos-memory.vercel.app/api/memory/public-status
-curl -I https://zenos-memory.vercel.app/dashboard
+curl -I https://zenos-memory.vercel.app
 ```
 
 Protected tests require Etla HMAC signature. Use Hermes tools when possible:
@@ -103,7 +103,8 @@ zenos_memory_search
 ## Key Endpoints
 
 ```text
-/dashboard                         public product dashboard
+/                                  public product dashboard
+/dashboard                         same dashboard alias
 /api/memory/public-status          public safe status
 /api/memory/compact                LLM structured handoff
 /api/memory/bootstrap              recovery context

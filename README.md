@@ -2,7 +2,7 @@
 
 **Status:** Production-ready / Done Final  
 **Production:** https://zenos-memory.vercel.app  
-**Dashboard:** https://zenos-memory.vercel.app/dashboard  
+**Dashboard:** https://zenos-memory.vercel.app  
 **Repo:** `xDath/zenos-memory`  
 **Owner:** Zenos / Hermes profile `zenos`
 
@@ -90,6 +90,7 @@ Legacy service account support exists only as fallback. The main production path
 Public/safe:
 
 ```text
+GET /
 GET /dashboard
 GET /api/memory/public-status
 ```
@@ -231,7 +232,7 @@ Basic public test:
 
 ```bash
 curl -s https://zenos-memory.vercel.app/api/memory/public-status
-curl -I https://zenos-memory.vercel.app/dashboard
+curl -I https://zenos-memory.vercel.app
 ```
 
 Protected smoke tests require `x-etla-timestamp` and `x-etla-signature`.
