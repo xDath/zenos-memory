@@ -21,7 +21,8 @@ It provides long-term memory, structured context compaction, bootstrap recovery,
 - Auto compact + bootstrap recovery
 - Credential-aware memory with secret filtering
 - Deterministic vector retrieval and neural-ready embedding endpoint
-- Temporal graph with weighted nodes and edges
+- Temporal graph with weighted nodes, edges, source lineage, and chunk provenance
+- Knowledge-graph document ingestion with entity and relationship indexes
 - Graph query and Mermaid visualization
 - Background maintainer and daily scheduler
 - Persistent lock lease audit

@@ -38,6 +38,9 @@ export function buildMaintenanceReport(memories: Memory[]) {
   const lowConfidence = memories.filter(m => (m.metadata.confidence || 0) < 0.55);
   const compactions = memories.filter(m => m.type === 'insight' && (m.metadata.tags || []).some(t => t.includes('compact')));
   const credentials = memories.filter(m => m.type === 'credential');
+  const withProvenance = memories.filter(m => !!m.metadata.provenance || !!m.metadata.source);
+  const relationshipIndexes = memories.filter(m => m.type === 'relationship' && m.metadata.tags.includes('relationship-index'));
+  const knowledgeChunks = memories.filter(m => m.type === 'file' && m.metadata.tags.includes('knowledge-chunk'));
   const graph = buildTemporalGraph(memories);
   const dedup = buildDedupPlan(memories);
 
@@ -49,6 +52,9 @@ export function buildMaintenanceReport(memories: Memory[]) {
       low_confidence: lowConfidence.length,
       compactions: compactions.length,
       credentials: credentials.length,
+      provenance_coverage: withProvenance.length,
+      knowledge_chunks: knowledgeChunks.length,
+      relationship_indexes: relationshipIndexes.length,
       graph_nodes: graph.stats.node_count,
       graph_edges: graph.stats.edge_count,
       dedup_candidates: dedup.length,
@@ -62,6 +68,8 @@ export function buildMaintenanceReport(memories: Memory[]) {
       dedup.length ? `Merge ${dedup.length} duplicate candidates` : 'No major duplicate cluster detected',
       stale.length ? `Archive/recompact ${stale.length} stale memories` : 'No stale memory pressure',
       graph.stats.edge_count > memories.length ? 'Temporal graph density is healthy' : 'Graph needs more relationship extraction',
+      withProvenance.length >= memories.length * 0.7 ? 'Provenance coverage is healthy' : 'Add provenance/source fields to more memories',
+      relationshipIndexes.length ? 'Knowledge graph ingestion is active' : 'Upload docs/repos to build relationship indexes',
       credentials.length ? 'Credential memory is active' : 'No credential memories stored yet',
     ],
   };

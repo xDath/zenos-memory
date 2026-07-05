@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Memory, RememberRequest, RecallRequest, MemoryMetadataSchema } from './schema';
 import { GoogleDriveMemoryStore, LocalFileMemoryStore, createDriveStore } from './drive';
+import { buildKnowledgeMemories } from './knowledge-ingestion';
 
 type ScoredMemory = Memory & { quality?: number; score?: number; reason?: string };
 
@@ -482,10 +483,17 @@ export class MemoryEngine {
     return agents.map(m => ({ agentId: (m.metadata as any).agentId || m.id, name: m.content, config: m.metadata }));
   }
 
-  async indexFile(content: string, filename: string, namespace = 'default') {
-    const chunks = content.split(/\n{2,}|(?<=\.)\s+/).map(c => c.trim()).filter(c => c.length > 20).slice(0, 50);
-    const memories = await this.rememberBatch(chunks.map(chunk => ({ content: chunk, type: 'file', namespace, metadata: { source: `file:${filename}`, tags: [filename.split('.').pop() || 'file'], importance: 6 } })));
-    return { indexed: memories.length, filename, namespace };
+  async indexFile(content: string, filename: string, namespace = 'default', agentId?: string) {
+    const requests = buildKnowledgeMemories(content, filename, namespace, agentId);
+    const memories = await this.rememberBatch(requests);
+    return {
+      indexed: memories.filter(m => m.type === 'file').length,
+      relationship_indexes: memories.filter(m => m.type === 'relationship').length,
+      entity_indexes: memories.filter(m => m.type === 'insight' && m.metadata.tags.includes('entity-index')).length,
+      filename,
+      namespace,
+      mode: 'knowledge-graph-ingestion',
+    };
   }
 
   async exportMemories(namespace: string | null = null, format = 'json') {

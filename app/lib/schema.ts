@@ -24,6 +24,12 @@ export const MemoryMetadataSchema = z.object({
     created_by: z.string().optional(),
     conversation_id: z.string().optional(),
     session_id: z.string().optional(),
+    source_id: z.string().optional(),
+    chunk_index: z.number().int().nonnegative().optional(),
+    heading: z.string().optional(),
+    evidence: z.string().optional(),
+    valid_from: z.string().datetime().optional(),
+    valid_to: z.string().datetime().optional(),
   }).optional(),
   tags: z.array(z.string()).default([]),
   version: z.number().int().positive().default(1),
@@ -39,6 +45,7 @@ export const MemoryMetadataSchema = z.object({
   // Credential specific
   is_secret: z.boolean().default(false),
   credential_for: z.string().optional(), // e.g. "vercel", "openai", "github"
+  description: z.string().optional(),
   redacted: z.boolean().default(false), // whether the content is redacted in some views
 });
 

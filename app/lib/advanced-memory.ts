@@ -4,7 +4,7 @@ export interface VectorRecord {
   id: string;
   vector: number[];
   text: string;
-  metadata: any;
+  metadata: Record<string, unknown>;
 }
 
 export interface GraphNode {
@@ -19,7 +19,7 @@ export interface GraphNode {
 export interface GraphEdge {
   source: string;
   target: string;
-  type: 'mentions' | 'related_to' | 'supersedes' | 'contradicts' | 'temporal_next' | 'credential_for';
+  type: 'mentions' | 'related_to' | 'supersedes' | 'contradicts' | 'temporal_next' | 'credential_for' | 'derived_from' | 'source_chunk' | 'same_entity';
   weight: number;
   timestamp?: string;
   memory_id?: string;
@@ -178,6 +178,31 @@ export function buildTemporalGraph(memories: Memory[]) {
       edges.push({ source: memory.id, target: entityId, type: 'mentions', weight: 1, timestamp: memory.created_at, memory_id: memory.id });
     }
 
+    const sourceId = memory.metadata.provenance?.source_id || memory.metadata.source;
+    if (sourceId) {
+      const sourceNodeId = `source:${String(sourceId).toLowerCase()}`;
+      upsertNode(sourceNodeId, {
+        label: String(sourceId),
+        type: 'topic',
+        weight: 1.5,
+        first_seen: memory.created_at,
+        last_seen: memory.updated_at,
+      });
+      edges.push({ source: memory.id, target: sourceNodeId, type: 'derived_from', weight: 1.4, timestamp: memory.created_at, memory_id: memory.id });
+    }
+
+    if (memory.metadata.provenance?.chunk_index !== undefined && sourceId) {
+      const chunkNodeId = `chunk:${String(sourceId).toLowerCase()}:${memory.metadata.provenance.chunk_index}`;
+      upsertNode(chunkNodeId, {
+        label: `${String(sourceId)}#${memory.metadata.provenance.chunk_index}`,
+        type: 'topic',
+        weight: 1.2,
+        first_seen: memory.created_at,
+        last_seen: memory.updated_at,
+      });
+      edges.push({ source: memory.id, target: chunkNodeId, type: 'source_chunk', weight: 1.2, timestamp: memory.created_at, memory_id: memory.id });
+    }
+
     for (const related of memory.metadata.related_ids || []) {
       edges.push({ source: memory.id, target: related, type: 'related_to', weight: 0.8, timestamp: memory.updated_at, memory_id: memory.id });
     }
@@ -187,9 +212,10 @@ export function buildTemporalGraph(memories: Memory[]) {
     for (const contradiction of memory.metadata.contradictions || []) {
       edges.push({ source: memory.id, target: `entity:${contradiction.toLowerCase()}`, type: 'contradicts', weight: 1, timestamp: memory.updated_at, memory_id: memory.id });
     }
-    if (memory.type === 'credential' && (memory.metadata as any).credential_for) {
-      const serviceId = `entity:${String((memory.metadata as any).credential_for).toLowerCase()}`;
-      upsertNode(serviceId, { label: (memory.metadata as any).credential_for, type: 'credential', weight: 2, first_seen: memory.created_at, last_seen: memory.updated_at });
+    if (memory.type === 'credential' && memory.metadata.credential_for) {
+      const service = memory.metadata.credential_for;
+      const serviceId = `entity:${service.toLowerCase()}`;
+      upsertNode(serviceId, { label: service, type: 'credential', weight: 2, first_seen: memory.created_at, last_seen: memory.updated_at });
       edges.push({ source: memory.id, target: serviceId, type: 'credential_for', weight: 2, timestamp: memory.updated_at, memory_id: memory.id });
     }
   }
