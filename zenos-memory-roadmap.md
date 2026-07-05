@@ -1,58 +1,150 @@
-# Zenos Memory Roadmap — Top Tier Agent Memory OS (Cloud-Owned)
+# Zenos Memory Roadmap — Elite Agent Memory OS
 
-**Updated:** 2026-07-04  
-**Status:** **PHASE 13 ADVANCED PUSH** — upgraded from basic/stub language into concrete advanced modules inspired by Mem0, Zep/Graphiti, Letta, and LangMem patterns.
+**Updated:** 2026-07-05  
+**Status:** Advanced production baseline implemented, deployed, and documented.
 
 ## Phase 1 — Embedding / Vector Search
-**Implemented:** deterministic 384-dim hashed embedding with token + n-gram features, cosine search, `/api/memory/vector` endpoint, hybrid recall path.  
-**Why advanced:** Works without paid embedding API, portable, privacy-preserving, deterministic, and can be swapped to real embeddings later.
+
+Implemented:
+
+- Deterministic 384-dimensional hashed embeddings
+- Token and n-gram features
+- Cosine vector search
+- `/api/memory/vector`
+- Neural-ready `/api/memory/embed` endpoint with deterministic fallback
+
+Future upgrade:
+
+- Configure a real embedding provider in the OpenAI-compatible router.
 
 ## Phase 2 — LLM Fact Extraction
-**Implemented:** DeepSeek/Gemini router enhancer, JSON-only extraction, credentials extraction, facts/preferences/decisions/tasks/entities/contradictions extraction.  
-**Why advanced:** LLM handles nuance + ambiguous statements; deterministic fallback remains.
+
+Implemented:
+
+- LLM extraction via `MEMORY_LLM_*`
+- Structured JSON extraction
+- Facts, preferences, decisions, tasks, artifacts, entities, contradictions, and credentials
+- Deterministic fallback
 
 ## Phase 3 — Temporal Graph
-**Implemented:** graph builder with memory nodes, entity nodes, credential nodes, weighted edges (`mentions`, `temporal_next`, `related_to`, `supersedes`, `contradicts`, `credential_for`), `/api/memory/graph`.  
-**Why advanced:** Not just tags — it produces navigable temporal relationships.
+
+Implemented:
+
+- Memory nodes
+- Entity nodes
+- Credential nodes
+- Weighted relationships
+- Temporal `next` edges
+- `mentions`, `related_to`, `supersedes`, `contradicts`, `credential_for`
+- `/api/memory/graph`
+- `/api/memory/graph-query`
+- `/api/memory/graph-mermaid`
 
 ## Phase 4 — Concurrency Lock / Versioning
-**Implemented:** optimistic versioning hooks, secret-aware recall filtering, audit-ready metadata.  
-**Next hardening:** drive-based lock leasing + conflict merge queue.
+
+Implemented:
+
+- Persistent lock lease audit endpoint
+- Optimistic write/version hooks
+- Expiring lock event memories
+- `/api/memory/lock`
+
+Future upgrade:
+
+- Full Drive-backed lock queue with compare-and-swap semantics.
 
 ## Phase 5 — Memory Compaction Lifecycle
-**Implemented:** LLM structured handoff, compaction memory, bootstrap prioritization, multi-level compaction architecture.
+
+Implemented:
+
+- LLM structured handoff
+- Compaction memory records
+- Bootstrap prioritization
+- Multi-level architecture for session → topic → durable profile
 
 ## Phase 6 — Evals / Benchmark
-**Implemented:** `/api/memory/eval` now computes readiness metrics from real memories: structured compaction, credential awareness, entity coverage, vector readiness, graph density, total score/status.
+
+Implemented:
+
+- `/api/memory/eval`
+- `/api/memory/benchmark`
+- Regression cases for credential recall, context lifecycle, temporal graph, entity linking, maintenance, and handoff quality
 
 ## Phase 7 — Context Lifecycle System
-**Implemented:** compact → store → bootstrap → recall recovery loop.
+
+Implemented:
+
+- Capture → extract → compact → persist → recover
+- Auto bootstrap on Hermes provider initialization
+- Auto compact threshold in Hermes provider
 
 ## Phase 8 — Structured Handoff
-**Implemented:** JSON handoff with current_goal, active_state, decisions, preferences, facts, completed, pending, blockers, files, recovery, credentials.
+
+Implemented:
+
+- `current_goal`
+- `active_state`
+- `key_decisions`
+- `user_preferences`
+- `important_facts`
+- `completed_work`
+- `pending_work`
+- `blockers`
+- `files_artifacts`
+- `recovery_instructions`
+- `credentials`
 
 ## Phase 9 — Auto Compact Endpoint
-**Implemented:** `/api/memory/compact` LLM-powered and credential-aware.
+
+Implemented:
+
+- `/api/memory/compact`
+- LLM-powered structured handoff
+- Credential auto-extraction
+- Drive persistence
 
 ## Phase 10 — Bootstrap Endpoint
-**Implemented:** `/api/memory/bootstrap` prioritizes compacts/insights and merges relevant memories.
+
+Implemented:
+
+- `/api/memory/bootstrap`
+- Prioritizes recent compactions and relevant memories
+- Returns context recovery block
 
 ## Phase 11 — Hermes Provider Auto-Trigger
-**Implemented:** auto bootstrap on initialize, auto compact every 20 turns, compact/bootstrap tools.
+
+Implemented:
+
+- Auto bootstrap on initialize
+- Auto compact every 20 turns
+- Tools for compact, bootstrap, maintenance, dashboard, graph query, benchmarks, credentials, and merge planning
 
 ## Phase 12 — Cloud-Owned Agent Context OS
-**Implemented:** Hermes → Etla HMAC → Vercel memory agent → Google Drive OAuth storage, no vendor lock-in.
+
+Implemented:
+
+- Vercel API runtime
+- Google Drive OAuth storage
+- Etla HMAC protection
+- Public dashboard and protected runtime
+- No database vendor lock-in
 
 ## Phase 13 — Auto Compact + Bootstrap Recovery
-**Implemented:** end-to-end test passed with session compaction and bootstrap recovery.
 
-## Production Status
-Ready for production use by Zenos/Hermes. Features are now advanced enough to be called top-tier baseline, not just basic. Remaining future polish: true neural embeddings, full graph query language, lock lease queue, regression datasets.
+Implemented:
 
-## Inspired By
-- Mem0: fact extraction, dedup, agent memory
-- Zep/Graphiti: temporal graph + relationship edges
-- Letta/MemGPT: memory blocks + working context
-- LangMem: procedural and profile memory
+- End-to-end compact and recovery loop
+- Scheduler maintenance
+- Benchmark and dashboard visibility
 
-Gass. Ini bukan basic lagi — ini advanced baseline dengan upgrade path ke elite mode.
+## Production Readiness
+
+Zenos Memory is ready to use as production infrastructure for Hermes/Zenos.
+
+Future work should be incremental improvements, not a rebuild:
+
+- real embedding provider credentials
+- graph visualization UI enhancements
+- larger benchmark datasets
+- stricter lock queue
+- additional SDK integrations

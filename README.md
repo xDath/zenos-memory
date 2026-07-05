@@ -1,53 +1,45 @@
 # Zenos Memory
 
-**Status:** Production-ready / Done Final  
-**Production:** https://zenos-memory.vercel.app  
-**Dashboard:** https://zenos-memory.vercel.app  
-**Repo:** `xDath/zenos-memory`  
-**Owner:** Zenos / Hermes profile `zenos`
+**Zenos Memory** is an elite, cloud-owned agent memory operating system for Hermes/Zenos.
 
-Zenos Memory is a cloud-owned agent memory operating system for Hermes/Zenos.
-It stores long-term agent memory in Google Drive via OAuth, uses Etla HMAC for protected APIs, and provides LLM-powered structured compaction, bootstrap recovery, vector retrieval, temporal graph, credential memory, maintenance, benchmarks, and scheduler automation.
+It provides long-term memory, structured context compaction, bootstrap recovery, credential-aware storage, vector retrieval, temporal graph reasoning, background maintenance, and production-safe APIs backed by Google Drive OAuth.
 
-## Should We Delete The Files?
+- **Production:** https://zenos-memory.vercel.app
+- **Dashboard:** https://zenos-memory.vercel.app
+- **Public Status:** https://zenos-memory.vercel.app/api/memory/public-status
+- **Runtime:** Next.js on Vercel
+- **Storage:** Google Drive OAuth, owned by the user
+- **Auth:** Etla HMAC for protected endpoints
+- **LLM Enhancer:** OpenAI-compatible router (`MEMORY_LLM_*`) with deterministic fallback
 
-**No. Do not delete this repo/project.**
+## Highlights
 
-Now that it is production-ready, we should treat this folder as the **source-of-truth codebase** and mostly act as a **consumer** from Hermes.
+- Google Drive OAuth structured storage
+- Etla HMAC protected API surface
+- Hermes provider integration
+- LLM-powered structured handoff, not plain summaries
+- Auto compact + bootstrap recovery
+- Credential-aware memory with secret filtering
+- Deterministic vector retrieval and neural-ready embedding endpoint
+- Temporal graph with weighted nodes and edges
+- Graph query and Mermaid visualization
+- Background maintainer and daily scheduler
+- Persistent lock lease audit
+- Elite benchmark endpoint
+- Public product dashboard with no sensitive data exposure
 
-Recommended mode:
-
-- Keep `/root/openclaw-projects/zenos-memory` as the maintenance repo.
-- Do not edit daily unless upgrading/fixing.
-- Hermes/Zenos should use it as a remote memory service via `https://zenos-memory.vercel.app`.
-- Do not delete `.zenos-secrets`; they hold deploy/OAuth helpers.
-- Do not commit secrets.
-
-Think of it like:
-
-```text
-Repo/local files = engine source code + maintenance
-Vercel = runtime API
-Google Drive = memory data
-Hermes plugin = consumer/client
-```
-
-## Runtime Architecture
+## Architecture
 
 ```text
-Hermes / Zenos profile
-  -> zenos-memory provider plugin
+Hermes / Zenos
+  -> Zenos Memory Provider
   -> Etla HMAC signed HTTPS
   -> Vercel Zenos Memory API
-  -> LLM enhancer via router.etla.me
+  -> LLM enhancer (optional)
   -> Google Drive OAuth structured storage
 ```
 
-## Storage
-
-Primary storage is **Google Drive OAuth** using the user's Google account quota.
-
-Drive structure:
+Drive layout:
 
 ```text
 zenos-memory/
@@ -66,36 +58,19 @@ zenos-memory/
       evals.json
 ```
 
-Legacy service account support exists only as fallback. The main production path is OAuth.
+## Public Endpoints
 
-## Core Features
-
-- Google Drive OAuth cloud-owned memory
-- Etla HMAC protected APIs
-- Hermes default provider integration
-- LLM structured handoff / auto compact
-- Bootstrap recovery after context reset
-- Credential-aware memory (`type=credential`)
-- Deterministic vector retrieval + neural-ready embedding endpoint
-- Temporal graph with weighted nodes/edges
-- Graph query + Mermaid graph visualization
-- Background maintainer
-- Daily scheduler cron
-- Persistent lock lease audit
-- Elite benchmark/regression endpoint
-- Public safe dashboard/status
-
-## Important URLs
-
-Public/safe:
+These endpoints are intentionally safe to expose:
 
 ```text
-GET /
-GET /dashboard
-GET /api/memory/public-status
+GET /                              Product dashboard
+GET /dashboard                     Dashboard alias
+GET /api/memory/public-status      Public service status
 ```
 
-Protected runtime APIs (require Etla signature):
+## Protected Runtime Endpoints
+
+Protected endpoints require Etla HMAC headers:
 
 ```text
 POST /api/memory/remember
@@ -115,7 +90,58 @@ POST /api/memory/lock
 POST /api/memory/merge
 ```
 
-## Hermes Consumer Setup
+## Environment Variables
+
+Use Vercel Environment Variables for production. Do not commit real values.
+
+```bash
+ETLA_MASTER_SECRET=change_me
+ZENOS_MEMORY_API_KEY=change_me
+
+GOOGLE_OAUTH_CLIENT_ID=your_client_id
+GOOGLE_OAUTH_CLIENT_SECRET=your_client_secret
+GOOGLE_OAUTH_REFRESH_TOKEN=your_refresh_token
+ZENOS_MEMORY_DRIVE_FOLDER_ID=root_or_folder_id
+ZENOS_MEMORY_DRIVE_STRUCTURED=true
+
+MEMORY_LLM_BASE_URL=https://router.example.com/v1
+MEMORY_LLM_API_KEY=your_router_key
+MEMORY_LLM_MODEL=provider/model-name
+MEMORY_LLM_FALLBACK_MODEL=provider/fallback-model
+MEMORY_EMBEDDING_MODEL=text-embedding-3-small
+
+CRON_SECRET=change_me
+USE_LOCAL_STORE=false
+```
+
+A sanitized template is available in `.env.example`.
+
+## Local Development
+
+```bash
+npm install
+cp .env.example .env.local
+npm run dev
+```
+
+The local server runs on the configured Next.js port.
+
+## Deploy
+
+```bash
+npm run build
+npx vercel --prod --yes
+```
+
+If using a saved Vercel token locally:
+
+```bash
+npx vercel --prod --token "$VERCEL_TOKEN" --yes
+```
+
+## Hermes Integration
+
+Hermes should consume Zenos Memory as a remote provider rather than modifying this repository during normal use.
 
 Hermes profile config:
 
@@ -124,19 +150,13 @@ memory:
   provider: zenos-memory
 ```
 
-Plugin path:
+Provider plugin path:
 
 ```text
-/root/.hermes/profiles/zenos/plugins/zenos-memory/__init__.py
+~/.hermes/profiles/zenos/plugins/zenos-memory/__init__.py
 ```
 
-Plugin config:
-
-```text
-/root/.hermes/profiles/zenos/zenos-memory.json
-```
-
-Expected fields:
+Provider config example:
 
 ```json
 {
@@ -149,7 +169,7 @@ Expected fields:
 
 ## Hermes Tools
 
-The provider exposes tools such as:
+The provider can expose tools such as:
 
 ```text
 zenos_memory_remember
@@ -167,120 +187,33 @@ zenos_memory_merge
 zenos_memory_mermaid
 ```
 
-Auto behavior:
+## Security Model
 
-- Auto bootstrap on provider initialize
-- Auto compact every 20 turns
-- Auto credential detection for obvious API keys/tokens
+- No production secrets are stored in this repository.
+- Public dashboard and public status expose only safe metadata.
+- Protected runtime endpoints require Etla HMAC signing.
+- Credential memories are filtered from normal recall.
+- Secret retrieval requires explicit credential tooling.
+- Google Drive data is owned by the OAuth account, not by a third-party database.
 
-## Credentials / Secrets
+## Operational Guide
 
-See `CREDENTIALS.md` for details.
+See [`OPERATIONS.md`](./OPERATIONS.md) for deployment, troubleshooting, maintenance, and future-self instructions.
 
-Current secret locations:
+See [`CREDENTIALS.md`](./CREDENTIALS.md) for secret management policy and environment setup.
 
-```text
-/root/.zenos-secrets/vercel-token.txt
-/root/.zenos-secrets/google-oauth-refresh-token.txt
-/root/.zenos-secrets/zenos-memory-sa.json   # legacy fallback only
-```
+See [`SECURITY.md`](./SECURITY.md) for public repository security expectations.
 
-Vercel envs contain encrypted runtime secrets:
+## Project Status
 
-```text
-ETLA_MASTER_SECRET
-ZENOS_MEMORY_API_KEY
-GOOGLE_OAUTH_CLIENT_ID
-GOOGLE_OAUTH_CLIENT_SECRET
-GOOGLE_OAUTH_REFRESH_TOKEN
-ZENOS_MEMORY_DRIVE_FOLDER_ID
-ZENOS_MEMORY_DRIVE_STRUCTURED
-MEMORY_LLM_BASE_URL
-MEMORY_LLM_API_KEY
-MEMORY_LLM_MODEL
-MEMORY_LLM_FALLBACK_MODEL
-CRON_SECRET
-```
+This project is considered **done-final** as production infrastructure.
 
-**Never commit actual secret values.**
+Recommended future work:
 
-## Deployment
+- Optional real neural embedding provider setup
+- Graph visualization UI improvements
+- Larger benchmark datasets
+- More strict Drive lock leases
+- Additional provider SDKs
 
-Use the saved token:
-
-```bash
-cd /root/openclaw-projects/zenos-memory
-npx vercel --prod --token $(cat /root/.zenos-secrets/vercel-token.txt) --yes
-```
-
-GitHub push:
-
-```bash
-git status
-git add <files>
-git commit -m "message"
-git push origin master
-```
-
-Vercel is connected to GitHub, but CLI deploy is also available.
-
-## Smoke Test Commands
-
-Generate Etla signature helper in Node/Python or use Hermes provider.
-
-Basic public test:
-
-```bash
-curl -s https://zenos-memory.vercel.app/api/memory/public-status
-curl -I https://zenos-memory.vercel.app
-```
-
-Protected smoke tests require `x-etla-timestamp` and `x-etla-signature`.
-Recommended protected endpoints to test:
-
-```text
-/api/memory/profile?namespace=zenos
-/api/memory/bootstrap
-/api/memory/benchmark
-/api/memory/dashboard
-/api/memory/vector
-/api/memory/graph
-```
-
-## Operational Guidance
-
-Day-to-day usage:
-
-- Do not work in this repo unless upgrading.
-- Use Hermes as consumer.
-- Let auto-compact and scheduler maintain memory.
-- Store new credentials through `zenos_memory_store_credential` or normal conversation if obvious token patterns are present.
-
-When something breaks:
-
-1. Check Vercel deployment status.
-2. Check Vercel envs.
-3. Check Google OAuth folder permissions.
-4. Run `/api/memory/public-status`.
-5. Run protected `/api/memory/benchmark`.
-6. Check `/root/.hermes/profiles/zenos/zenos-memory.json` secret/base URL.
-
-## Production Checklist
-
-- [x] GitHub private repo clean of credentials
-- [x] Vercel production deployed
-- [x] Google Drive OAuth storage working
-- [x] Etla HMAC auth working
-- [x] Hermes provider default
-- [x] Auto compact + bootstrap
-- [x] Credential memory support
-- [x] Vector + graph + benchmark + dashboard
-- [x] Daily scheduler cron
-
-## Final Note
-
-Zenos Memory is now complete enough to treat as infrastructure.
-From here, Hermes should primarily consume it rather than rebuilding it every session.
-Future work should be small upgrades, bug fixes, or UI enhancements — not another rebuild.
-
-Built for Zenos by Etla.
+Built for Zenos / Hermes.
