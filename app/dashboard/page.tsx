@@ -142,6 +142,25 @@ export default function Dashboard() {
           </div>
         </section>
 
+        <section className="mt-14 rounded-[2rem] border border-cyan-300/20 bg-cyan-300/[0.04] p-6">
+          <p className="text-sm uppercase tracking-[0.25em] text-cyan-300">Evidence Layer</p>
+          <h2 className="mt-2 text-3xl font-black">What is verifiable right now</h2>
+          <div className="mt-6 grid gap-3 md:grid-cols-4">
+            {[
+              ['Smoke Suite', 'public + protected endpoint checks', 'npm run smoke:prod'],
+              ['Benchmark V3', 'hybrid + mutation regression evidence', '/api/memory/benchmark'],
+              ['Episode API', 'temporal/provenance memory slices', '/api/memory/episodes'],
+              ['SDK Imports', 'JS and Python client import checks', 'sdk/js + sdk/python'],
+            ].map(([title, desc, link]) => (
+              <div key={title} className="rounded-2xl border border-white/10 bg-zinc-950/60 p-4">
+                <div className="font-bold text-white">{title}</div>
+                <div className="mt-2 text-sm leading-6 text-zinc-400">{desc}</div>
+                <div className="mt-3 font-mono text-xs text-cyan-200">{link}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+
         <section className="mt-14 grid gap-6 lg:grid-cols-[0.85fr_1.15fr]">
           <div className="rounded-[2rem] border border-white/10 bg-white/[0.04] p-6">
             <p className="text-sm uppercase tracking-[0.25em] text-cyan-300">Lifecycle</p>

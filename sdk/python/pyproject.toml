@@ -1,0 +1,11 @@
+[project]
+name = "zenos-memory-client"
+version = "0.1.0"
+description = "Educational Python SDK client for Zenos Memory HMAC APIs."
+readme = "../../docs/SDK.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["agent-memory", "hmac", "learning", "vercel", "google-drive"]
+
+[tool.setuptools]
+py-modules = ["zenos_memory_client"]
