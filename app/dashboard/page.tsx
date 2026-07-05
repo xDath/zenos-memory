@@ -4,6 +4,8 @@ const features = [
   ['Cloud-Owned Storage', 'Google Drive OAuth structured persistence', 'LIVE'],
   ['Vector Retrieval', 'Deterministic embeddings + neural-ready endpoint', 'LIVE'],
   ['Temporal Graph', 'Entity, memory, credential and relationship graph', 'LIVE'],
+  ['Hybrid Recall', 'Vector + keyword + graph + current-state ranking', 'V2'],
+  ['Mutation Engine', 'Supersession, contradiction and timeline planning', 'V3'],
   ['Credential Memory', 'Explicit secret type, filtered recall, secure retrieval', 'LIVE'],
   ['Maintainer', 'Dedup plans, stale checks, graph health, recommendations', 'LIVE'],
   ['Scheduler', 'Daily Vercel cron for background maintenance', 'LIVE'],
@@ -14,6 +16,9 @@ const endpoints = [
   ['/api/memory/compact', 'POST', 'LLM structured context compaction'],
   ['/api/memory/bootstrap', 'POST', 'Recovery bootstrap from compact + relevant memory'],
   ['/api/memory/vector', 'POST', 'Advanced vector retrieval'],
+  ['/api/memory/hybrid-recall', 'POST', 'Hybrid vector + keyword + graph recall'],
+  ['/api/memory/mutation-plan', 'POST', 'State-change supersession planning'],
+  ['/api/memory/timeline', 'GET', 'Temporal state timeline'],
   ['/api/memory/embed', 'POST', 'Neural-ready embedding endpoint + deterministic fallback'],
   ['/api/memory/graph', 'GET', 'Temporal graph JSON'],
   ['/api/memory/graph-query', 'POST', 'Hybrid vector + graph traversal'],
@@ -50,7 +55,7 @@ export default function Dashboard() {
             <div className="grid h-10 w-10 place-items-center rounded-full bg-emerald-300 text-lg font-black text-zinc-950">Z</div>
             <div>
               <div className="font-bold">Zenos Memory</div>
-              <div className="text-xs text-zinc-400">Elite Agent Memory OS</div>
+              <div className="text-xs text-zinc-400">Cloud-Owned Memory Lab</div>
             </div>
           </div>
           <a href="/api/memory/public-status" className="rounded-full border border-emerald-300/30 px-4 py-2 text-sm text-emerald-200 hover:bg-emerald-300/10">
@@ -61,15 +66,15 @@ export default function Dashboard() {
         <div className="grid gap-8 lg:grid-cols-[1.05fr_0.95fr] lg:items-center">
           <div>
             <p className="mb-4 inline-flex rounded-full border border-emerald-300/20 bg-emerald-300/10 px-4 py-2 text-xs font-bold uppercase tracking-[0.32em] text-emerald-200">
-              Production Ready / Cloud-Owned
+              Educational Demo / Cloud-Owned
             </p>
             <h1 className="max-w-4xl text-6xl font-black leading-[0.9] tracking-[-0.06em] md:text-8xl">
               Memory that survives context death.
             </h1>
             <p className="mt-7 max-w-2xl text-lg leading-8 text-zinc-300">
-              Zenos Memory is a Drive-owned, Etla-signed memory operating system for Hermes: LLM compaction,
-              structured handoff, graph retrieval, vector search, credential awareness, scheduler maintenance,
-              and bootstrap recovery in one production layer.
+              Zenos Memory is a Drive-owned, Etla-signed educational memory lab for agents: LLM compaction,
+              structured handoff, hybrid recall, graph retrieval, credential-aware patterns, scheduler maintenance,
+              and bootstrap recovery in one hosted learning deployment.
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
               <a href="/api/memory/public-status" className="rounded-2xl bg-emerald-300 px-5 py-3 font-bold text-zinc-950 hover:bg-emerald-200">
