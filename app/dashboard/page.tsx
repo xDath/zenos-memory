@@ -61,7 +61,7 @@ export default function Dashboard() {
             </div>
           </div>
           <a href="/api/memory/public-status" className="rounded-full border border-emerald-300/30 px-4 py-2 text-sm text-emerald-200 hover:bg-emerald-300/10">
-            Public Status
+            JSON Status
           </a>
         </nav>
 
@@ -79,11 +79,11 @@ export default function Dashboard() {
               and bootstrap recovery in one hosted learning deployment.
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
-              <a href="/api/memory/public-status" className="rounded-2xl bg-emerald-300 px-5 py-3 font-bold text-zinc-950 hover:bg-emerald-200">
-                Inspect Status
+              <a href="#evidence" className="rounded-2xl bg-emerald-300 px-5 py-3 font-bold text-zinc-950 hover:bg-emerald-200">
+                View Evidence Cards
               </a>
-              <a href="#endpoints" className="rounded-2xl border border-white/15 bg-white/[0.05] px-5 py-3 font-bold text-white hover:bg-white/[0.09]">
-                View API Surface
+              <a href="/api/memory/public-status" className="rounded-2xl border border-white/15 bg-white/[0.05] px-5 py-3 font-bold text-white hover:bg-white/[0.09]">
+                Inspect JSON Status
               </a>
             </div>
           </div>
@@ -142,7 +142,7 @@ export default function Dashboard() {
           </div>
         </section>
 
-        <section className="mt-14 rounded-[2rem] border border-cyan-300/20 bg-cyan-300/[0.04] p-6">
+        <section id="evidence" className="mt-14 rounded-[2rem] border border-cyan-300/20 bg-cyan-300/[0.04] p-6">
           <p className="text-sm uppercase tracking-[0.25em] text-cyan-300">Evidence Layer</p>
           <h2 className="mt-2 text-3xl font-black">What is verifiable right now</h2>
           <div className="mt-6 grid gap-3 md:grid-cols-4">

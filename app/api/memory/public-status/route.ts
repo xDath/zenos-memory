@@ -9,6 +9,23 @@ export async function GET() {
     storage: 'Google Drive OAuth (cloud-owned)',
     auth: 'Etla HMAC protected APIs',
     llm: 'DeepSeek primary via router.etla.me with fallback',
+    version: 'learning-polish-v4',
+    last_polish: {
+      commit: 'ea38b51',
+      focus: 'SDK package metadata, smoke suite, dashboard evidence layer',
+      deployed_alias: 'https://zenos-memory.vercel.app',
+    },
+    evidence: {
+      smoke_suite: 'npm run smoke:prod',
+      smoke_checks: ['public-status', 'hybrid-recall', 'mutation-plan', 'timeline', 'episodes', 'benchmark'],
+      benchmark: 'zenos-memory-elite-regression-v3',
+      benchmark_status: 'elite-pass',
+      sdk_clients: ['sdk/js/zenos-memory-client.mjs', 'sdk/python/zenos_memory_client.py'],
+      examples: ['examples/js/basic.mjs', 'examples/python/basic.py'],
+      docs: ['docs/SDK.md', 'docs/HERMES_PLUGIN.md'],
+      dashboard_cards: ['Smoke Suite', 'Benchmark V3', 'Episode API', 'SDK Imports'],
+    },
+    note: 'This endpoint is JSON evidence. Open / or /dashboard for the visual dashboard.',
     features: [
       'advanced structured handoff',
       'auto compact endpoint',
