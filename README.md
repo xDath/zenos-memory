@@ -28,6 +28,8 @@ It demonstrates structured context compaction, bootstrap recovery, credential-aw
 - Hybrid retrieval ranker with vector, keyword, graph, recency, confidence, and current-state signals
 - Memory mutation engine for supersession, contradiction, and state-change tracking
 - Graph query and Mermaid visualization
+- Episode builder for temporal/provenance slices
+- Lightweight JS/Python SDK clients and CLI
 - Background maintainer and daily scheduler
 - Persistent lock lease audit
 - Elite benchmark endpoint
@@ -83,6 +85,7 @@ POST /api/memory/recall
 POST /api/memory/hybrid-recall
 POST /api/memory/mutation-plan
 GET  /api/memory/timeline
+GET  /api/memory/episodes
 POST /api/memory/compact
 POST /api/memory/bootstrap
 POST /api/memory/vector
@@ -186,9 +189,23 @@ Provider config example:
 
 Auto-compact runs every configured turn interval, triggers early for long transcripts, and preserves context before Hermes compression with `on_pre_compress`.
 
-## CLI
+## SDK / CLI
 
-A lightweight CLI is included for agents or operators that need a direct API bridge:
+Lightweight SDK clients are included for agents or operators that need a direct API bridge:
+
+```js
+import { ZenosMemoryClient } from './sdk/js/zenos-memory-client.mjs';
+const memory = new ZenosMemoryClient({ secret: process.env.ETLA_MASTER_SECRET });
+await memory.recall('auto compact', { namespace: 'zenos' });
+```
+
+```python
+from sdk.python.zenos_memory_client import ZenosMemoryClient
+memory = ZenosMemoryClient()
+memory.recall('auto compact', namespace='zenos')
+```
+
+The CLI uses the same HMAC flow:
 
 ```bash
 ETLA_MASTER_SECRET="<ETLA_MASTER_SECRET>" npm run cli -- recall "auto compact" zenos
