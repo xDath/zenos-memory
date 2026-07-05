@@ -1,252 +1,285 @@
 # Zenos Memory
 
-Custom advanced memory system for Zenos / Hermes agent.
+**Status:** Production-ready / Done Final  
+**Production:** https://zenos-memory.vercel.app  
+**Dashboard:** https://zenos-memory.vercel.app/dashboard  
+**Repo:** `xDath/zenos-memory`  
+**Owner:** Zenos / Hermes profile `zenos`
 
-**Storage**: Google Drive (primary) + local fallback  
-**API**: Next.js (Vercel)  
-**Goal**: Better than mem0 — full control, rich metadata, quality-focused, intelligence layer.
+Zenos Memory is a cloud-owned agent memory operating system for Hermes/Zenos.
+It stores long-term agent memory in Google Drive via OAuth, uses Etla HMAC for protected APIs, and provides LLM-powered structured compaction, bootstrap recovery, vector retrieval, temporal graph, credential memory, maintenance, benchmarks, and scheduler automation.
 
-## Quick Start (Local)
+## Should We Delete The Files?
 
-```bash
-npm install
-cp .env.example .env
-# Edit .env with your GOOGLE_SERVICE_ACCOUNT_KEY and DRIVE_FOLDER_ID
-npm run dev
+**No. Do not delete this repo/project.**
+
+Now that it is production-ready, we should treat this folder as the **source-of-truth codebase** and mostly act as a **consumer** from Hermes.
+
+Recommended mode:
+
+- Keep `/root/openclaw-projects/zenos-memory` as the maintenance repo.
+- Do not edit daily unless upgrading/fixing.
+- Hermes/Zenos should use it as a remote memory service via `https://zenos-memory.vercel.app`.
+- Do not delete `.zenos-secrets`; they hold deploy/OAuth helpers.
+- Do not commit secrets.
+
+Think of it like:
+
+```text
+Repo/local files = engine source code + maintenance
+Vercel = runtime API
+Google Drive = memory data
+Hermes plugin = consumer/client
 ```
 
-Server runs at http://localhost:3090
+## Runtime Architecture
 
-## Environment
+```text
+Hermes / Zenos profile
+  -> zenos-memory provider plugin
+  -> Etla HMAC signed HTTPS
+  -> Vercel Zenos Memory API
+  -> LLM enhancer via router.etla.me
+  -> Google Drive OAuth structured storage
+```
 
-See `.env.example`
+## Storage
 
-Required for Drive:
-- `GOOGLE_SERVICE_ACCOUNT_KEY` (JSON string)
-- `ZENOS_MEMORY_DRIVE_FOLDER_ID`
-- `ZENOS_MEMORY_API_KEY`
+Primary storage is **Google Drive OAuth** using the user's Google account quota.
 
-For local-only testing:
-- Set `USE_LOCAL_STORE=true`
+Drive structure:
 
-## API
+```text
+zenos-memory/
+  namespaces/
+    zenos/
+      memories.json
+      entities.json
+      relationships.json
+      profile.json
+      audit.json
+      compactions.json
+      indexes.json
+      tasks.json
+      decisions.json
+      artifacts.json
+      evals.json
+```
 
-### Remember
-`POST /api/memory/remember`
+Legacy service account support exists only as fallback. The main production path is OAuth.
+
+## Core Features
+
+- Google Drive OAuth cloud-owned memory
+- Etla HMAC protected APIs
+- Hermes default provider integration
+- LLM structured handoff / auto compact
+- Bootstrap recovery after context reset
+- Credential-aware memory (`type=credential`)
+- Deterministic vector retrieval + neural-ready embedding endpoint
+- Temporal graph with weighted nodes/edges
+- Graph query + Mermaid graph visualization
+- Background maintainer
+- Daily scheduler cron
+- Persistent lock lease audit
+- Elite benchmark/regression endpoint
+- Public safe dashboard/status
+
+## Important URLs
+
+Public/safe:
+
+```text
+GET /dashboard
+GET /api/memory/public-status
+```
+
+Protected runtime APIs (require Etla signature):
+
+```text
+POST /api/memory/remember
+POST /api/memory/recall
+POST /api/memory/compact
+POST /api/memory/bootstrap
+POST /api/memory/vector
+POST /api/memory/embed
+GET  /api/memory/graph
+POST /api/memory/graph-query
+GET  /api/memory/graph-mermaid
+POST /api/memory/maintain
+POST /api/memory/benchmark
+GET  /api/memory/dashboard
+POST /api/memory/scheduler
+POST /api/memory/lock
+POST /api/memory/merge
+```
+
+## Hermes Consumer Setup
+
+Hermes profile config:
+
+```yaml
+memory:
+  provider: zenos-memory
+```
+
+Plugin path:
+
+```text
+/root/.hermes/profiles/zenos/plugins/zenos-memory/__init__.py
+```
+
+Plugin config:
+
+```text
+/root/.hermes/profiles/zenos/zenos-memory.json
+```
+
+Expected fields:
 
 ```json
 {
-  "content": "Tuan likes gass langsung execution style",
-  "type": "preference",
+  "base_url": "https://zenos-memory.vercel.app",
+  "secret": "<ETLA_MASTER_SECRET>",
   "namespace": "zenos",
-  "metadata": {
-    "tags": ["style", "etla"],
-    "confidence": 0.95,
-    "importance": 8
-  }
+  "prefetch_limit": 5
 }
 ```
 
-### Recall
-`POST /api/memory/recall`
+## Hermes Tools
 
-```json
-{
-  "query": "execution style",
-  "namespace": "zenos",
-  "limit": 10,
-  "min_confidence": 0.7
-}
+The provider exposes tools such as:
+
+```text
+zenos_memory_remember
+zenos_memory_search
+zenos_memory_report
+zenos_memory_compact
+zenos_memory_bootstrap
+zenos_memory_store_credential
+zenos_memory_get_credential
+zenos_memory_maintain
+zenos_memory_graph_query
+zenos_memory_dashboard
+zenos_memory_benchmark
+zenos_memory_merge
+zenos_memory_mermaid
 ```
 
-Returns scored results (keyword + recency + importance).
+Auto behavior:
 
-Other:
-- POST /api/memory/edit
-- POST /api/memory/forget
-- GET /api/memory/stats?namespace=zenos
+- Auto bootstrap on provider initialize
+- Auto compact every 20 turns
+- Auto credential detection for obvious API keys/tokens
 
-## Auth
-All endpoints require:
-- `x-api-key: <your-key>` header
-- or `Authorization: Bearer <your-key>`
+## Credentials / Secrets
 
-## Roadmap Alignment
+See `CREDENTIALS.md` for details.
 
-See [zenos-memory-roadmap.md](../zenos-memory-roadmap.md) (in parent dir) for full phases.
+Current secret locations:
 
-Current: Phase 0 + Core Engine (remember/recall/edit/forget + basic scoring).
+```text
+/root/.zenos-secrets/vercel-token.txt
+/root/.zenos-secrets/google-oauth-refresh-token.txt
+/root/.zenos-secrets/zenos-memory-sa.json   # legacy fallback only
+```
 
-## Deploy to Vercel
+Vercel envs contain encrypted runtime secrets:
+
+```text
+ETLA_MASTER_SECRET
+ZENOS_MEMORY_API_KEY
+GOOGLE_OAUTH_CLIENT_ID
+GOOGLE_OAUTH_CLIENT_SECRET
+GOOGLE_OAUTH_REFRESH_TOKEN
+ZENOS_MEMORY_DRIVE_FOLDER_ID
+ZENOS_MEMORY_DRIVE_STRUCTURED
+MEMORY_LLM_BASE_URL
+MEMORY_LLM_API_KEY
+MEMORY_LLM_MODEL
+MEMORY_LLM_FALLBACK_MODEL
+CRON_SECRET
+```
+
+**Never commit actual secret values.**
+
+## Deployment
+
+Use the saved token:
 
 ```bash
-# From this dir
-npx vercel --prod --yes
-# Set env vars in Vercel dashboard
+cd /root/openclaw-projects/zenos-memory
+npx vercel --prod --token $(cat /root/.zenos-secrets/vercel-token.txt) --yes
 ```
 
-Manual like Zenos Mail:
+GitHub push:
+
 ```bash
-npx vercel --prod --token $VERCEL_TOKEN --yes
+git status
+git add <files>
+git commit -m "message"
+git push origin master
 ```
 
-## Future
+Vercel is connected to GitHub, but CLI deploy is also available.
 
-- Real embeddings (via 9router or Vercel AI)
-- Conflict detection
-- Relationship graph
-- Daily intelligence reports
-- File upload indexing
-- Integration with Hermes via custom tool
+## Smoke Test Commands
 
-Built by Etla for tuan.
+Generate Etla signature helper in Node/Python or use Hermes provider.
 
-## Important Note about Google Drive Storage
+Basic public test:
 
-Regular 'My Drive' folders have quota restrictions for Service Accounts.
-
-**You MUST use a Shared Drive (Team Drive)** for the memory storage to work.
-
-Steps:
-1. Create Shared Drive in Google Drive
-2. Put your folder inside the Shared Drive
-3. Share the Shared Drive with the service account email: zenos-memory@zenos-memory.iam.gserviceaccount.com (Manager role)
-4. Give the folder ID from inside the Shared Drive
-
-Current service account email: zenos-memory@zenos-memory.iam.gserviceaccount.com
-
-
-## Storage Limitation (Updated)
-
-Current status:
-- Service Account JSON saved securely
-- Sharing (Editor) done on folder
-- **No Shared Drives available** (personal Gmail account)
-
-Google restricts Service Account storage quota on regular My Drive folders.
-
-**Current active storage**: Local file (persistent on this VPS)
-
-If you get a Google Workspace account later, we can switch to Shared Drive.
-
-For now we proceed with local + continue building features.
-
-
-### Workaround for Personal Drive (No Shared Drive)
-
-Because Service Accounts have quota restrictions on creating files in regular My Drive:
-
-**Manual pre-creation step (this is the common workaround people use):**
-
-1. As the OWNER (Altedria), go to the 'Zenos Memory' folder.
-2. Create a new file named **exactly** `zenos-memories.json`
-3. Put this content inside it: `[]`
-4. Save the file.
-5. Right-click the file → Share → add the service account email with Editor.
-6. Tell me when done.
-
-After that the code will find the existing file and only do updates (which usually works on the owner's quota).
-
-I improved the error message in the code to guide this.
-
-
-## Phase Progress
-
-**Phase 0: Foundation** — ✅ COMPLETE
-
-**Phase 1: Core Memory Engine** — IN PROGRESS
-- ✅ remember (single + batch)
-- ✅ recall with filters (type, confidence, tags, temporal created_after/before)
-- ✅ edit + forget
-- ✅ basic versioning + previous versions
-- ✅ answer (RAG context compilation)
-- ✅ Provenance & typed memory
-
-Next in Phase 1: from-conversation helper, more robust temporal, prepare for embedding.
-
-## Phase 1 Complete
-
-All core features from the roadmap are implemented and tested with real Google Drive storage.
-
-**Ready for Phase 2**
-
-## Phase 2 Complete
-
-All Phase 2 features implemented and **tested** with Google Drive:
-- Quality Scoring
-- Conflict Detection
-- Temporal Decay
-- Auto-tagging
-- Relationships
-- Enhanced recall
-
-Ready for Phase 3.
-
-## Phase 3 Complete
-
-Intelligence Layer fully implemented and tested:
-- Daily reports
-- Conflict resolution
-- Relationship graphs
-- Insights
-- Health checks
-
-Current: Up to Phase 3 complete. Roadmap has 5 phases total.
-
-## Phase 4 Complete
-
-Agent ecosystem features added and code updated:
-- Agents
-- File indexing
-- Export/Backup
-- Audit
-- Enhanced graph
-
-Roadmap now at Phase 4 complete. 1 phase left (Production).
-
-## Phase 5: Production & Polish — COMPLETE
-
-### Deployment to Vercel
-
-This API is designed for Vercel (like Zenos Mail).
-
-**Preparation:**
-1. Set environment variables in Vercel dashboard:
-   - `GOOGLE_SERVICE_ACCOUNT_KEY` = full JSON string of service account
-   - `ZENOS_MEMORY_DRIVE_FOLDER_ID`
-   - `ZENOS_MEMORY_API_KEY`
-   - `USE_LOCAL_STORE=false`
-
-**Deploy:**
 ```bash
-npx vercel --prod --yes
-# or with token
-npx vercel --prod --token $VERCEL_TOKEN --yes
+curl -s https://zenos-memory.vercel.app/api/memory/public-status
+curl -I https://zenos-memory.vercel.app/dashboard
 ```
 
-**Important:** Use KEY (string) not FILE on Vercel. Local storage does not persist.
+Protected smoke tests require `x-etla-timestamp` and `x-etla-signature`.
+Recommended protected endpoints to test:
 
-### Rate Limiting
-Basic 60 req/min per IP on main endpoints.
+```text
+/api/memory/profile?namespace=zenos
+/api/memory/bootstrap
+/api/memory/benchmark
+/api/memory/dashboard
+/api/memory/vector
+/api/memory/graph
+```
 
-### Backup & Recovery
-- `/api/memory/export`
-- `/api/memory/backup`
+## Operational Guidance
 
-### Full API List
-See routes in app/api/memory/
+Day-to-day usage:
 
+- Do not work in this repo unless upgrading.
+- Use Hermes as consumer.
+- Let auto-compact and scheduler maintain memory.
+- Store new credentials through `zenos_memory_store_credential` or normal conversation if obvious token patterns are present.
 
-## Security & Safe Deployment (IMPORTANT)
+When something breaks:
 
-**Service Account Key Handling:**
-- Never commit the JSON key or .env files.
-- On VPS: use GOOGLE_SERVICE_ACCOUNT_FILE pointing to secure location.
-- On Vercel: set GOOGLE_SERVICE_ACCOUNT_KEY as the full JSON **string** (not file).
+1. Check Vercel deployment status.
+2. Check Vercel envs.
+3. Check Google OAuth folder permissions.
+4. Run `/api/memory/public-status`.
+5. Run protected `/api/memory/benchmark`.
+6. Check `/root/.hermes/profiles/zenos/zenos-memory.json` secret/base URL.
 
-**Safe Vercel Deploy:**
-1. Add env vars in Vercel dashboard (KEY as string).
-2. Use `./scripts/deploy-vercel.sh [token]`
-3. Verify folder is shared with the service account.
+## Production Checklist
 
-All phases complete. System is production-ready with safety measures.
+- [x] GitHub private repo clean of credentials
+- [x] Vercel production deployed
+- [x] Google Drive OAuth storage working
+- [x] Etla HMAC auth working
+- [x] Hermes provider default
+- [x] Auto compact + bootstrap
+- [x] Credential memory support
+- [x] Vector + graph + benchmark + dashboard
+- [x] Daily scheduler cron
+
+## Final Note
+
+Zenos Memory is now complete enough to treat as infrastructure.
+From here, Hermes should primarily consume it rather than rebuilding it every session.
+Future work should be small upgrades, bug fixes, or UI enhancements — not another rebuild.
+
+Built for Zenos by Etla.
