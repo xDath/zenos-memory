@@ -22,25 +22,32 @@ https://zenos-memory.vercel.app
 
 ## Install Plugin
 
-Create the plugin directory:
+Recommended install from this repository:
+
+```bash
+./scripts/install-hermes-plugin.sh
+```
+
+The installer copies the plugin into the selected Hermes profile and writes safe non-secret defaults to `zenos-memory.json`, including auto-compact settings. It does **not** write credentials.
+
+Optional environment overrides:
+
+```bash
+HERMES_PROFILE=zenos \
+ZENOS_MEMORY_URL=https://zenos-memory.vercel.app \
+ZENOS_MEMORY_NAMESPACE=zenos \
+ZENOS_MEMORY_AUTO_COMPACT_EVERY=10 \
+ZENOS_MEMORY_AUTO_COMPACT_MIN_CHARS=6000 \
+ZENOS_MEMORY_AUTO_COMPACT_MAX_MESSAGES=80 \
+./scripts/install-hermes-plugin.sh
+```
+
+Manual install is still supported:
 
 ```bash
 mkdir -p ~/.hermes/profiles/zenos/plugins/zenos-memory
-```
-
-Copy the plugin file into:
-
-```text
-~/.hermes/profiles/zenos/plugins/zenos-memory/__init__.py
-```
-
-If installing from this repository:
-
-```bash
 cp plugins/zenos-memory/__init__.py ~/.hermes/profiles/zenos/plugins/zenos-memory/__init__.py
 ```
-
-If the plugin file is not included in your checkout, use the deployed API directly or copy it from your existing Hermes profile.
 
 ## Configure Plugin
 
@@ -57,7 +64,10 @@ Example:
   "base_url": "https://zenos-memory.vercel.app",
   "secret": "<ETLA_MASTER_SECRET>",
   "namespace": "zenos",
-  "prefetch_limit": 5
+  "prefetch_limit": 5,
+  "auto_compact_every": 10,
+  "auto_compact_min_chars": 6000,
+  "auto_compact_max_messages": 80
 }
 ```
 
@@ -104,7 +114,9 @@ The provider can:
 
 - bootstrap memory on session initialize
 - sync turns into Zenos Memory
-- auto-compact after a threshold
+- auto-compact every `auto_compact_every` turns
+- auto-compact early when recent transcript reaches `auto_compact_min_chars`
+- preserve context through Hermes compression via `on_pre_compress`
 - detect obvious credentials and store them as credential memories
 
 ## Test

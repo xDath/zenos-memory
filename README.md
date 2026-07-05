@@ -156,6 +156,12 @@ Provider plugin path:
 ~/.hermes/profiles/zenos/plugins/zenos-memory/__init__.py
 ```
 
+Install the Hermes plugin with non-secret defaults:
+
+```bash
+./scripts/install-hermes-plugin.sh
+```
+
 Provider config example:
 
 ```json
@@ -163,9 +169,14 @@ Provider config example:
   "base_url": "https://zenos-memory.vercel.app",
   "secret": "<ETLA_MASTER_SECRET>",
   "namespace": "zenos",
-  "prefetch_limit": 5
+  "prefetch_limit": 5,
+  "auto_compact_every": 10,
+  "auto_compact_min_chars": 6000,
+  "auto_compact_max_messages": 80
 }
 ```
+
+Auto-compact runs every configured turn interval, triggers early for long transcripts, and preserves context before Hermes compression with `on_pre_compress`.
 
 ## Hermes Tools
 

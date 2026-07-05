@@ -10,6 +10,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import threading
 import time
 from typing import Any, Dict, List
@@ -34,6 +35,9 @@ def _load_config() -> dict:
         "secret": os.environ.get("ETLA_MASTER_SECRET", ""),
         "namespace": os.environ.get("ZENOS_MEMORY_NAMESPACE", DEFAULT_NAMESPACE),
         "prefetch_limit": int(os.environ.get("ZENOS_MEMORY_PREFETCH_LIMIT", "5")),
+        "auto_compact_every": int(os.environ.get("ZENOS_MEMORY_AUTO_COMPACT_EVERY", "10")),
+        "auto_compact_min_chars": int(os.environ.get("ZENOS_MEMORY_AUTO_COMPACT_MIN_CHARS", "6000")),
+        "auto_compact_max_messages": int(os.environ.get("ZENOS_MEMORY_AUTO_COMPACT_MAX_MESSAGES", "80")),
     }
     path = get_hermes_home() / "zenos-memory.json"
     if path.exists():
@@ -63,6 +67,9 @@ class ZenosMemoryProvider(MemoryProvider):
         self._secret = ""
         self._namespace = DEFAULT_NAMESPACE
         self._prefetch_limit = 5
+        self._auto_compact_every = 10
+        self._auto_compact_min_chars = 6000
+        self._auto_compact_max_messages = 80
         self._prefetch_result = ""
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: threading.Thread | None = None
@@ -98,9 +105,9 @@ class ZenosMemoryProvider(MemoryProvider):
         self._secret = str(self._cfg.get("secret") or "")
         self._namespace = str(self._cfg.get("namespace") or DEFAULT_NAMESPACE)
         self._prefetch_limit = int(self._cfg.get("prefetch_limit") or 5)
-        self._turn_count = 0
-        self._auto_bootstrap()
-        self._turn_count = 0
+        self._auto_compact_every = int(self._cfg.get("auto_compact_every") or 10)
+        self._auto_compact_min_chars = int(self._cfg.get("auto_compact_min_chars") or 6000)
+        self._auto_compact_max_messages = int(self._cfg.get("auto_compact_max_messages") or 80)
         self._turn_count = 0
         self._auto_bootstrap()
 
@@ -236,8 +243,8 @@ class ZenosMemoryProvider(MemoryProvider):
                 logger.debug("Zenos Memory sync failed", exc_info=True)
 
         self._turn_count += 1
-        if self._turn_count % 20 == 0:
-            self._auto_compact(user_content, assistant_content, session_id)
+        if self._should_auto_compact(user_content, assistant_content, messages):
+            self._auto_compact(user_content, assistant_content, session_id, messages=messages)
         self._sync_thread = threading.Thread(target=worker, daemon=True)
         self._sync_thread.start()
 
@@ -387,18 +394,42 @@ class ZenosMemoryProvider(MemoryProvider):
         except Exception:
             logger.debug("Zenos auto bootstrap failed", exc_info=True)
 
-    def _auto_compact(self, user_content: str, assistant_content: str, session_id: str = ""):
+    def _should_auto_compact(self, user_content: str, assistant_content: str, messages=None) -> bool:
+        total_chars = len(user_content or "") + len(assistant_content or "")
+        if messages:
+            total_chars = sum(len(str(m.get("content", ""))) for m in messages[-self._auto_compact_max_messages:])
+        periodic = self._auto_compact_every > 0 and self._turn_count % self._auto_compact_every == 0
+        return periodic or total_chars >= self._auto_compact_min_chars
+
+    def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
+        if not self._secret or not messages:
+            return ""
         try:
-            messages = [
+            res = self._request("POST", "/api/memory/compact", {
+                "messages": messages[-self._auto_compact_max_messages:],
+                "namespace": self._namespace,
+                "reason": "hermes-pre-compress",
+                "approx_tokens": sum(len(str(m.get("content", ""))) for m in messages),
+            })
+            compact = res.get("compact") or res.get("summary") or res.get("handoff") or res.get("bootstrap") or ""
+            if compact:
+                return "Zenos Memory compact preserved before compression:\n" + str(compact)
+        except Exception:
+            logger.debug("Zenos pre-compress compact failed", exc_info=True)
+        return ""
+
+    def _auto_compact(self, user_content: str, assistant_content: str, session_id: str = "", messages=None):
+        try:
+            compact_messages = messages[-self._auto_compact_max_messages:] if messages else [
                 {"role": "user", "content": user_content},
-                {"role": "assistant", "content": assistant_content[:2000]}
+                {"role": "assistant", "content": assistant_content[:4000]}
             ]
             self._request("POST", "/api/memory/compact", {
-                "messages": messages,
+                "messages": compact_messages,
                 "namespace": self._namespace,
                 "reason": "auto-compact",
                 "session_id": session_id,
-                "approx_tokens": len(user_content) + len(assistant_content)
+                "approx_tokens": sum(len(str(m.get("content", ""))) for m in compact_messages)
             })
         except Exception:
             logger.debug("Zenos auto compact failed", exc_info=True)
