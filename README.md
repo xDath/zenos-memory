@@ -1,15 +1,17 @@
 # Zenos Memory
 
-**Zenos Memory** is an elite, cloud-owned agent memory operating system for Hermes/Zenos.
+**Zenos Memory** is an educational, cloud-owned agent memory experiment for learning how long-term memory, compaction, retrieval, graph reasoning, and agent tooling can work together.
 
-It provides long-term memory, structured context compaction, bootstrap recovery, credential-aware storage, vector retrieval, temporal graph reasoning, background maintenance, and production-safe APIs backed by Google Drive OAuth.
+It demonstrates structured context compaction, bootstrap recovery, credential-aware storage patterns, hybrid retrieval, temporal graph reasoning, background maintenance, and protected APIs using Vercel plus Google Drive OAuth.
 
-- **Production:** https://zenos-memory.vercel.app
+> Learning-only notice: this repository is shared for study, experimentation, and portfolio/reference purposes. It is not a drop-in production service. Let an agent/operator review, configure, and harden the deployment before using it with real data.
+
+- **Demo:** https://zenos-memory.vercel.app
 - **Dashboard:** https://zenos-memory.vercel.app
 - **Public Status:** https://zenos-memory.vercel.app/api/memory/public-status
 - **Runtime:** Next.js on Vercel
 - **Storage:** Google Drive OAuth, owned by the user
-- **Auth:** Etla HMAC for protected endpoints
+- **Auth Pattern:** Etla HMAC for protected endpoints
 - **LLM Enhancer:** OpenAI-compatible router (`MEMORY_LLM_*`) with deterministic fallback
 
 ## Highlights
@@ -78,6 +80,9 @@ Protected endpoints require Etla HMAC headers:
 ```text
 POST /api/memory/remember
 POST /api/memory/recall
+POST /api/memory/hybrid-recall
+POST /api/memory/mutation-plan
+GET  /api/memory/timeline
 POST /api/memory/compact
 POST /api/memory/bootstrap
 POST /api/memory/vector
@@ -95,7 +100,7 @@ POST /api/memory/merge
 
 ## Environment Variables
 
-Use Vercel Environment Variables for production. Do not commit real values.
+Use Vercel Environment Variables for a hosted learning deployment. Do not commit real values.
 
 ```bash
 ETLA_MASTER_SECRET=change_me

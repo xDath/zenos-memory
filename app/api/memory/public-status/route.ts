@@ -4,8 +4,8 @@ export async function GET() {
   return NextResponse.json({
     success: true,
     service: 'Zenos Memory',
-    status: 'production-ready',
-    tier: 'elite-agent-memory-os',
+    status: 'educational-demo',
+    tier: 'cloud-owned-agent-memory-lab',
     storage: 'Google Drive OAuth (cloud-owned)',
     auth: 'Etla HMAC protected APIs',
     llm: 'DeepSeek primary via router.etla.me with fallback',
