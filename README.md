@@ -23,6 +23,8 @@ It provides long-term memory, structured context compaction, bootstrap recovery,
 - Deterministic vector retrieval and neural-ready embedding endpoint
 - Temporal graph with weighted nodes, edges, source lineage, and chunk provenance
 - Knowledge-graph document ingestion with entity and relationship indexes
+- Hybrid retrieval ranker with vector, keyword, graph, recency, confidence, and current-state signals
+- Memory mutation engine for supersession, contradiction, and state-change tracking
 - Graph query and Mermaid visualization
 - Background maintainer and daily scheduler
 - Persistent lock lease audit
@@ -178,6 +180,18 @@ Provider config example:
 ```
 
 Auto-compact runs every configured turn interval, triggers early for long transcripts, and preserves context before Hermes compression with `on_pre_compress`.
+
+## CLI
+
+A lightweight CLI is included for agents or operators that need a direct API bridge:
+
+```bash
+ETLA_MASTER_SECRET="<ETLA_MASTER_SECRET>" npm run cli -- recall "auto compact" zenos
+ETLA_MASTER_SECRET="<ETLA_MASTER_SECRET>" npm run cli -- remember "important fact" zenos
+ETLA_MASTER_SECRET="<ETLA_MASTER_SECRET>" npm run cli -- ingest notes.md "$(cat notes.md)" zenos
+```
+
+For full setup, prefer letting the installing agent run `./scripts/install-hermes-plugin.sh`, configure Vercel environment variables, and connect Google Drive storage.
 
 ## Hermes Tools
 

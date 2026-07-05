@@ -6,7 +6,8 @@
     "dev": "next dev -p 3090",
     "build": "next build",
     "start": "next start -p 3090",
-    "lint": "eslint"
+    "lint": "eslint",
+    "cli": "node scripts/zenos-memory-cli.mjs"
   },
   "dependencies": {
     "googleapis": "^173.0.0",

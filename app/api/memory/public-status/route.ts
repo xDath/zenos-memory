@@ -20,6 +20,8 @@ export async function GET() {
       'source lineage and chunk provenance',
       'knowledge-graph document ingestion',
       'entity and relationship indexes',
+      'hybrid retrieval ranker',
+      'memory mutation engine',
       'graph query',
       'Mermaid graph visualization',
       'background maintainer',

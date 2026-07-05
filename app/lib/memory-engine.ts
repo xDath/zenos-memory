@@ -2,6 +2,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { Memory, RememberRequest, RecallRequest, MemoryMetadataSchema } from './schema';
 import { GoogleDriveMemoryStore, LocalFileMemoryStore, createDriveStore } from './drive';
 import { buildKnowledgeMemories } from './knowledge-ingestion';
+import { rankHybrid } from './hybrid-retrieval';
+import { buildMutationPlan, markSuperseded } from './memory-mutation';
 
 type ScoredMemory = Memory & { quality?: number; score?: number; reason?: string };
 
@@ -177,10 +179,18 @@ export class MemoryEngine {
     }
 
     const now = new Date().toISOString();
+    const mutation = buildMutationPlan(req.content, (all as Memory[]).filter(m => m.namespace === namespace));
     const metadata = MemoryMetadataSchema.parse({
       ...req.metadata,
-      tags: this.normalizeTags([...(req.metadata?.tags || []), ...(await this.autoTag(req.content))]),
+      provenance: {
+        ...(req.metadata?.provenance || {}),
+        valid_from: req.metadata?.provenance?.valid_from || mutation.valid_from,
+      },
+      tags: this.normalizeTags([...(req.metadata?.tags || []), ...(await this.autoTag(req.content)), mutation.reason]),
       entities: [...new Set([...(req.metadata?.entities || []), ...this.extractEntities(req.content)])],
+      related_ids: this.normalizeTags([...(req.metadata?.related_ids || []), ...mutation.related_ids]),
+      supersedes_ids: this.normalizeTags([...(req.metadata?.supersedes_ids || []), ...mutation.supersedes_ids]),
+      contradictions: this.normalizeTags([...(req.metadata?.contradictions || []), ...mutation.contradictions]),
       timestamp: now,
     });
 
@@ -195,6 +205,7 @@ export class MemoryEngine {
     };
 
     all.push(newMemory);
+    markSuperseded(all as Memory[], metadata.supersedes_ids || [], now);
     await this.saveMemories(all as Memory[], newMemory.namespace);
     return newMemory;
   }
@@ -244,15 +255,19 @@ export class MemoryEngine {
       memories = memories.filter(m => !((m.metadata as any).is_secret));
     }
 
+    const hybrid = rankHybrid(query, memories, req.limit || 10);
+    const hybridMap = new Map(hybrid.map(item => [item.memory.id, item]));
     const scored = memories.map(memory => {
       const quality = this.computeQualityScore(memory);
+      const hybridHit = hybridMap.get(memory.id);
       const similarity = this.textSimilarity(query, `${memory.content} ${memory.metadata.tags.join(' ')}`);
       const exact = memory.content.toLowerCase().includes(queryLower) ? 1 : 0;
       const tagOverlap = memory.metadata.tags.filter(t => queryTags.has(t.toLowerCase())).length;
       const recency = this.recencyScore(memory);
       const importance = (memory.metadata.importance || 5) / 10;
-      const score = (similarity * 45) + (exact * 20) + (tagOverlap * 8) + (quality * 20) + (recency * 5) + (importance * 5);
-      const reason = exact ? 'exact-match' : similarity > 0.4 ? 'semantic-similarity' : tagOverlap ? 'tag-match' : 'quality-recency';
+      const fallbackScore = (similarity * 45) + (exact * 20) + (tagOverlap * 8) + (quality * 20) + (recency * 5) + (importance * 5);
+      const score = hybridHit ? hybridHit.score + (quality * 10) : fallbackScore;
+      const reason = hybridHit?.reason || (exact ? 'exact-match' : similarity > 0.4 ? 'semantic-similarity' : tagOverlap ? 'tag-match' : 'quality-recency');
       return { ...memory, quality, score, reason };
     });
 
