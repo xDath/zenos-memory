@@ -215,6 +215,14 @@ ETLA_MASTER_SECRET="<ETLA_MASTER_SECRET>" npm run cli -- ingest notes.md "$(cat 
 
 For full setup, prefer letting the installing agent run `./scripts/install-hermes-plugin.sh`, configure Vercel environment variables, and connect Google Drive storage.
 
+## Smoke Test
+
+```bash
+ETLA_MASTER_SECRET="<ETLA_MASTER_SECRET>" npm run smoke:prod
+```
+
+The smoke suite checks public status, hybrid recall, mutation planning, timeline, episodes, and benchmark v3.
+
 ## Hermes Tools
 
 The provider can expose tools such as:

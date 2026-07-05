@@ -110,10 +110,10 @@ export default function Dashboard() {
 
         <div className="mt-12 grid gap-4 md:grid-cols-4">
           {[
-            ['13', 'Implemented Phases'],
-            ['Drive', 'Owned Persistence'],
-            ['LLM', 'Reasoned Compaction'],
-            ['Graph', 'Temporal Context'],
+            ['SDK', 'JS + Python Clients'],
+            ['V3', 'Benchmark Evidence'],
+            ['Episodes', 'Temporal Slices'],
+            ['Hybrid', 'Recall Ranking'],
           ].map(([big, label]) => (
             <div key={label} className="rounded-3xl border border-white/10 bg-white/[0.045] p-6 backdrop-blur-xl">
               <div className="text-4xl font-black text-emerald-200">{big}</div>
