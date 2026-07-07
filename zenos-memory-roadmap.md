@@ -198,8 +198,8 @@ Completed for the current intelligence-amplification milestone:
 - Auth/integration troubleshooting completed: direct HMAC-signed production write to `/api/memory/remember` succeeded using the Hermes plugin config. The earlier `ZENOS_MEMORY_API_KEY is not configured` error is from a separate session tool wrapper path, not the deployed HMAC API path.
 - Compact audit completed for the target gap: `/api/memory/compact` now normalizes/redacts message content before sending it to the LLM enhancer and redacts compact output before storage/return.
 - Bootstrap eval coverage added: `app/lib/intelligence-eval.ts` verifies that compacted output can be rendered through `renderBootstrapBlock` as agent-ready recovery context.
-- Intelligence eval coverage added: `/api/memory/benchmark` now includes `zenos-memory-intelligence-amplification-v2` cases for north-star preservation, roadmap discipline, pending work, bootstrap readiness, secret redaction, lower-tier bootstrap improvement, and consumer-contract enforcement.
-- Production deploy completed: `https://zenos-memory.vercel.app` was aliased to the new deployment and signed production benchmark returns `zenos-memory-elite-regression-v5-intelligence-amplification`, `case_count: 15`, `score: 1`, `status: elite-pass`.
+- Intelligence eval coverage added: `/api/memory/benchmark` now includes `zenos-memory-intelligence-amplification-v3` cases for north-star preservation, roadmap discipline, pending work, bootstrap readiness, secret redaction, lower-tier bootstrap improvement, consumer-contract enforcement, and retrieval relevance.
+- Production deploy completed: `https://zenos-memory.vercel.app` was aliased to the new deployment and signed production benchmark returns `zenos-memory-elite-regression-v6-intelligence-amplification`, `case_count: 16`, `score: 1`, `status: elite-pass`.
 
 Remaining risks and follow-up backlog:
 
@@ -207,7 +207,7 @@ Remaining risks and follow-up backlog:
 - `npm run lint` still fails on pre-existing broad `no-explicit-any` lint debt across the repository; this milestone avoided introducing a new `any` in the touched compact route but did not clean the whole repo.
 - `npm run build` succeeds, but Next config currently skips type and eslint validation (`ignoreBuildErrors` / `ignoreDuringBuilds`), so future hardening should include a separate type/lint cleanup milestone.
 - The session-level `zenos_memory_remember` wrapper still needs a separate integration fix or config bridge if that exact tool path should write through HMAC instead of requiring `ZENOS_MEMORY_API_KEY`.
-- Retrieval upgrade remains future work: real embedding provider or local embedding path should wait until lifecycle reliability remains stable.
+- Retrieval baseline is now covered by deterministic embedding relevance eval; real embedding provider or local embedding path remains future hardening after lifecycle reliability stays stable.
 
 ## Next Work Queue
 

@@ -1,4 +1,5 @@
 import { buildDagCompactSnapshot, renderBootstrapBlock, CompactRequest } from './compaction';
+import { deterministicEmbedding, cosineSimilarity } from './advanced-memory';
 import { Memory } from './schema';
 
 function fixtureMemory(id: string, content: string, importance: number, tags: string[] = []): Memory {
@@ -102,6 +103,12 @@ export function runIntelligenceAmplificationEval() {
     'Never expose raw secrets from memory or compact output.',
   ].join('\n');
 
+  const retrievalQuery = 'what is the active target for lower tier llm intelligence upgrade';
+  const unrelated = 'Steam marketplace listing hold and mobile authenticator troubleshooting.';
+  const relevant = bootstrap;
+  const retrievalSimilarity = cosineSimilarity(deterministicEmbedding(retrievalQuery), deterministicEmbedding(relevant));
+  const unrelatedSimilarity = cosineSimilarity(deterministicEmbedding(retrievalQuery), deterministicEmbedding(unrelated));
+
   const cases = [
     {
       name: 'compact_preserves_north_star',
@@ -131,17 +138,27 @@ export function runIntelligenceAmplificationEval() {
       name: 'consumer_contract_enforces_scope_and_safety',
       pass: containsAll(consumerContract, ['bootstrap', 'roadmap', 'scope drift', 'benchmark', 'secrets']),
     },
+    {
+      name: 'retrieval_prefers_relevant_context',
+      pass: retrievalSimilarity > unrelatedSimilarity,
+    },
   ];
 
   const passed = cases.filter(c => c.pass).length;
   return {
     success: passed === cases.length,
-    benchmark: 'zenos-memory-intelligence-amplification-v2',
+    benchmark: 'zenos-memory-intelligence-amplification-v3',
     score: passed / cases.length,
     cases,
     lower_tier_simulation: {
       no_memory: { answer: noMemoryAnswer, ...noMemoryScore },
       with_memory: { answer: withMemoryAnswer, ...withMemoryScore },
+    },
+    retrieval_eval: {
+      query: retrievalQuery,
+      relevant_similarity: Number(retrievalSimilarity.toFixed(4)),
+      unrelated_similarity: Number(unrelatedSimilarity.toFixed(4)),
+      provider: 'deterministic-hashed-embedding-baseline',
     },
     consumer_contract: consumerContract,
     compact_preview: compact.content.slice(0, 800),
