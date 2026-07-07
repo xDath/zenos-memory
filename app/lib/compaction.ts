@@ -36,22 +36,31 @@ const DEFAULT_BOOTSTRAP_QUERIES = [
   'gass langsung no questions execution style keep hermes base zenos memory',
 ];
 
+export function redactSensitiveText(text: string): string {
+  return text
+    .replace(/sk-(?=[A-Za-z0-9._-]*\d)[A-Za-z0-9._-]{8,}/g, '[REDACTED_OPENAI_KEY]')
+    .replace(/vcp_[A-Za-z0-9_-]{8,}/g, '[REDACTED_VERCEL_TOKEN]')
+    .replace(/ghp_[A-Za-z0-9_]{8,}/g, '[REDACTED_GITHUB_TOKEN]')
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, '[REDACTED_GOOGLE_KEY]')
+    .replace(/AKIA[0-9A-Z]{12,}/g, '[REDACTED_AWS_KEY]');
+}
+
 export function normalizeContent(content: unknown): string {
-  if (typeof content === 'string') return content;
+  if (typeof content === 'string') return redactSensitiveText(content);
   if (Array.isArray(content)) {
     return content.map((part) => {
-      if (typeof part === 'string') return part;
+      if (typeof part === 'string') return redactSensitiveText(part);
       if (part && typeof part === 'object') {
         const p = part as Record<string, unknown>;
-        return String(p.text || p.content || p.type || '');
+        return redactSensitiveText(String(p.text || p.content || p.type || ''));
       }
-      return String(part ?? '');
+      return redactSensitiveText(String(part ?? ''));
     }).join(' ');
   }
   if (content && typeof content === 'object') {
-    try { return JSON.stringify(content); } catch { return String(content); }
+    try { return redactSensitiveText(JSON.stringify(content)); } catch { return redactSensitiveText(String(content)); }
   }
-  return String(content ?? '');
+  return redactSensitiveText(String(content ?? ''));
 }
 
 function compactLine(role: string, content: unknown, max = 520): string | null {

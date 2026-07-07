@@ -4,6 +4,7 @@ import { deterministicEmbedding, cosineSimilarity } from '../../../lib/advanced-
 import { compactWithLLM, hasMemoryLLM } from '../../../lib/memory-llm';
 import { buildMutationPlan } from '../../../lib/memory-mutation';
 import { rankHybrid } from '../../../lib/hybrid-retrieval';
+import { runIntelligenceAmplificationEval } from '../../../lib/intelligence-eval';
 import { Memory } from '../../../lib/schema';
 
 const CASES = [
@@ -63,15 +64,18 @@ export async function POST(request: NextRequest) {
     { name: 'mutation_supersession', pass: mutation.supersedes_ids.includes(fixture[0].id), plan: mutation },
   ];
 
-  const score = [...results, ...advanced_results].filter(r => r.pass).length / (results.length + advanced_results.length);
+  const intelligence_eval = runIntelligenceAmplificationEval();
+  const baseScore = [...results, ...advanced_results].filter(r => r.pass).length / (results.length + advanced_results.length);
+  const score = Number(((baseScore * 0.7) + (intelligence_eval.score * 0.3)).toFixed(4));
   return NextResponse.json({
     success: true,
-    benchmark: 'zenos-memory-elite-regression-v3',
-    case_count: CASES.length + advanced_results.length,
+    benchmark: 'zenos-memory-elite-regression-v5-intelligence-amplification',
+    case_count: CASES.length + advanced_results.length + intelligence_eval.cases.length,
     score,
     status: score >= 0.9 ? 'elite-pass' : score >= 0.75 ? 'pass-with-polish' : 'fail',
     results,
     advanced_results,
+    intelligence_eval,
     compact_eval,
   });
 }

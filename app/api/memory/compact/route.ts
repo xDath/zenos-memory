@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
-import { CompactRequestSchema } from '../../../lib/compaction';
+import { CompactRequestSchema, normalizeContent, redactSensitiveText } from '../../../lib/compaction';
 import { compactWithLLM, hasMemoryLLM } from '../../../lib/memory-llm';
 import { getMemoryEngine } from '../../../lib/memory-engine';
 
@@ -19,7 +19,7 @@ export async function POST(request: NextRequest) {
     }
 
     const conversationText = req.messages
-      .map((m: any) => `${m.role}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`)
+      .map((m) => `${m.role}: ${normalizeContent(m.content)}`)
       .join('\n\n')
       .slice(0, 24000);
 
@@ -32,13 +32,19 @@ export async function POST(request: NextRequest) {
       }, { status: 500 });
     }
 
-    const parsed = llmResult.parsed;
+    const parsed = {
+      ...llmResult.parsed,
+      credentials: (llmResult.parsed.credentials || []).map((cred: Record<string, unknown>) => ({
+        ...cred,
+        key: cred.key ? redactSensitiveText(String(cred.key)) : cred.key,
+      })),
+    };
     const engine = getMemoryEngine();
     const namespace = req.namespace || 'zenos';
 
     // Store the main structured handoff as insight
     const compactResult = {
-      content: llmResult.content,
+      content: redactSensitiveText(llmResult.content),
       type: 'insight' as const,
       metadata: {
         source: 'zenos-memory-advanced-llm-compact',
