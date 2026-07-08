@@ -199,9 +199,9 @@ Completed for the current intelligence-amplification milestone:
 - Compact audit completed for the target gap: `/api/memory/compact` now normalizes/redacts message content before sending it to the LLM enhancer and redacts compact output before storage/return.
 - Bootstrap eval coverage added: `app/lib/intelligence-eval.ts` verifies that compacted output can be rendered through `renderBootstrapBlock` as agent-ready recovery context.
 - Intelligence eval coverage added: `/api/memory/benchmark` now includes `zenos-memory-intelligence-amplification-v3` cases for north-star preservation, roadmap discipline, pending work, bootstrap readiness, secret redaction, lower-tier bootstrap improvement, consumer-contract enforcement, and retrieval relevance.
-- Production deploy completed: `https://zenos-memory.vercel.app` was aliased to the new deployment and signed production benchmark returns `zenos-memory-elite-regression-v7-intelligence-amplification`, `case_count: 16`, `score: 1`, `status: elite-pass`.
+- Production deploy completed: `https://zenos-memory.vercel.app` was aliased to the new deployment and signed production benchmark returns `zenos-memory-elite-regression-v8-intelligence-amplification`, `case_count: 16`, `score: 1`, `status: elite-pass`.
 
-- Real LLM A/B endpoint added: `/api/memory/ab-eval` runs provider-backed with/without-bootstrap comparison when `MEMORY_LLM_*` is configured, otherwise reports a skipped state and points to deterministic benchmark baseline.
+- Multi-case real LLM A/B endpoint added: `/api/memory/ab-eval` runs provider-backed with/without-bootstrap comparisons across continuation recovery, pending task recall, scope drift resistance, and secret safety when `MEMORY_LLM_*` is configured, otherwise reports a skipped state and points to deterministic benchmark baseline.
 
 Remaining risks and follow-up backlog:
 
