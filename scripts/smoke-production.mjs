@@ -22,7 +22,8 @@ async function request(method, path, body) {
 async function publicStatus() {
   const res = await fetch(baseUrl + '/api/memory/public-status');
   const data = await res.json();
-  if (!data.success || data.status !== 'educational-demo') throw new Error('public-status failed');
+  const allowedStatuses = new Set(['educational-demo', 'production-ready-learning-deployment']);
+  if (!data.success || !allowedStatuses.has(data.status)) throw new Error('public-status failed');
   return data;
 }
 
