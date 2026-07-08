@@ -69,7 +69,7 @@ export async function POST(request: NextRequest) {
   const score = Number(((baseScore * 0.7) + (intelligence_eval.score * 0.3)).toFixed(4));
   return NextResponse.json({
     success: true,
-    benchmark: 'zenos-memory-elite-regression-v8-intelligence-amplification',
+    benchmark: 'zenos-memory-elite-regression-v9-intelligence-amplification',
     case_count: CASES.length + advanced_results.length + intelligence_eval.cases.length,
     score,
     status: score >= 0.9 ? 'elite-pass' : score >= 0.75 ? 'pass-with-polish' : 'fail',

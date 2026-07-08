@@ -1,5 +1,6 @@
 import { google } from 'googleapis';
 import * as fs from 'fs/promises';
+import { readFileSync } from 'fs';
 import * as path from 'path';
 
 interface DriveConfig {
@@ -256,7 +257,7 @@ export function createDriveStore(): GoogleDriveMemoryStore {
 
   if (keyFile) {
     try {
-      const fileContent = require('fs').readFileSync(keyFile, 'utf8');
+      const fileContent = readFileSync(keyFile, 'utf8');
       credentials = JSON.parse(fileContent);
     } catch {
       throw new Error('Failed to read or parse GOOGLE_SERVICE_ACCOUNT_FILE');

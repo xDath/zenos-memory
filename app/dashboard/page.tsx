@@ -10,7 +10,8 @@ const features = [
   ['Credential Memory', 'Explicit secret type, filtered recall, secure retrieval', 'LIVE'],
   ['Maintainer', 'Dedup plans, stale checks, graph health, recommendations', 'LIVE'],
   ['Scheduler', 'Daily Vercel cron for background maintenance', 'LIVE'],
-  ['Benchmarks', 'Elite regression smoke suite', 'ELITE PASS'],
+  ['Benchmarks', 'Elite regression + real A/B eval suite', 'ELITE PASS'],
+  ['A/B Intelligence Eval', '4-case with/without-bootstrap model comparison', 'LIVE'],
 ];
 
 const endpoints = [
@@ -28,6 +29,7 @@ const endpoints = [
   ['/api/memory/maintain', 'POST', 'Background memory manager'],
   ['/api/memory/dashboard', 'GET', 'Protected live metrics JSON'],
   ['/api/memory/benchmark', 'POST', 'Elite regression benchmark'],
+  ['/api/memory/ab-eval', 'POST', 'Real LLM with/without-bootstrap A/B evaluation'],
   ['/api/memory/scheduler', 'GET/POST', 'Scheduled maintenance'],
   ['/api/memory/lock', 'GET/POST', 'Persistent lock lease audit'],
   ['/api/memory/public-status', 'GET', 'Public safe status'],
@@ -111,7 +113,7 @@ export default function Dashboard() {
         <div className="mt-12 grid gap-4 md:grid-cols-4">
           {[
             ['SDK', 'JS + Python Clients'],
-            ['V3', 'Benchmark Evidence'],
+            ['V8', 'Benchmark Evidence'],
             ['Episodes', 'Temporal Slices'],
             ['Hybrid', 'Recall Ranking'],
           ].map(([big, label]) => (
@@ -148,8 +150,8 @@ export default function Dashboard() {
           <div className="mt-6 grid gap-3 md:grid-cols-4">
             {[
               ['Smoke Suite', 'public + protected endpoint checks', 'npm run smoke:prod'],
-              ['Benchmark V3', 'hybrid + mutation regression evidence', '/api/memory/benchmark'],
-              ['Episode API', 'temporal/provenance memory slices', '/api/memory/episodes'],
+              ['Benchmark V8', 'hybrid + mutation + intelligence amplification evidence', '/api/memory/benchmark'],
+              ['A/B Eval V2', 'real model with/without-bootstrap comparison', '/api/memory/ab-eval'],
               ['SDK Imports', 'JS and Python client import checks', 'sdk/js + sdk/python'],
             ].map(([title, desc, link]) => (
               <div key={title} className="rounded-2xl border border-white/10 bg-zinc-950/60 p-4">
