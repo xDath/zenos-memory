@@ -235,3 +235,7 @@ Remaining risks and follow-up backlog:
 - Do not replace the project or architecture unless the roadmap records why incremental improvement is insufficient.
 - Do not rely on chat context alone for project direction; update this roadmap when priorities change.
 - Do not store raw secrets in normal memories or final summaries.
+
+## Production Ready Milestone
+
+Status: complete for production-ready learning deployment. Gates: build pass, lint quiet pass, production smoke pass, benchmark elite-pass, real A/B eval positive, public status aligned, dashboard evidence updated, and `PRODUCTION_READINESS.md` added. Remaining future hardening is optional: stricter provider typing and neural embedding credentials.

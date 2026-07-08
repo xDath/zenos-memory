@@ -4,14 +4,14 @@ export async function GET() {
   return NextResponse.json({
     success: true,
     service: 'Zenos Memory',
-    status: 'educational-demo',
-    tier: 'cloud-owned-agent-memory-lab',
+    status: 'production-ready-learning-deployment',
+    tier: 'llm-intelligence-amplification-layer',
     storage: 'Google Drive OAuth (cloud-owned)',
     auth: 'Etla HMAC protected APIs',
     llm: 'DeepSeek primary via router.etla.me with fallback',
-    version: 'intelligence-amplification-v6',
+    version: 'production-ready-v1',
     last_polish: {
-      commit: 'local-roadmap-v6',
+      commit: 'production-ready-v1',
       focus: 'LLM intelligence amplification roadmap, compact redaction, benchmark v7 eval layer, lower-tier bootstrap simulation, retrieval relevance baseline, and multi-case real LLM A/B endpoint',
       deployed_alias: 'https://zenos-memory.vercel.app',
     },
@@ -27,6 +27,8 @@ export async function GET() {
       examples: ['examples/js/basic.mjs', 'examples/python/basic.py'],
       docs: ['docs/SDK.md', 'docs/HERMES_PLUGIN.md'],
       dashboard_cards: ['Smoke Suite', 'Benchmark V9', 'A/B Eval Endpoint', 'SDK Imports'],
+      production_gates: ['build-pass', 'lint-quiet-pass', 'smoke-pass', 'benchmark-elite-pass', 'ab-eval-positive'],
+      readiness_doc: 'PRODUCTION_READINESS.md',
     },
     note: 'This endpoint is JSON evidence. Open / or /dashboard for the visual dashboard.',
     features: [
