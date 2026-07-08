@@ -199,7 +199,9 @@ Completed for the current intelligence-amplification milestone:
 - Compact audit completed for the target gap: `/api/memory/compact` now normalizes/redacts message content before sending it to the LLM enhancer and redacts compact output before storage/return.
 - Bootstrap eval coverage added: `app/lib/intelligence-eval.ts` verifies that compacted output can be rendered through `renderBootstrapBlock` as agent-ready recovery context.
 - Intelligence eval coverage added: `/api/memory/benchmark` now includes `zenos-memory-intelligence-amplification-v3` cases for north-star preservation, roadmap discipline, pending work, bootstrap readiness, secret redaction, lower-tier bootstrap improvement, consumer-contract enforcement, and retrieval relevance.
-- Production deploy completed: `https://zenos-memory.vercel.app` was aliased to the new deployment and signed production benchmark returns `zenos-memory-elite-regression-v6-intelligence-amplification`, `case_count: 16`, `score: 1`, `status: elite-pass`.
+- Production deploy completed: `https://zenos-memory.vercel.app` was aliased to the new deployment and signed production benchmark returns `zenos-memory-elite-regression-v7-intelligence-amplification`, `case_count: 16`, `score: 1`, `status: elite-pass`.
+
+- Real LLM A/B endpoint added: `/api/memory/ab-eval` runs provider-backed with/without-bootstrap comparison when `MEMORY_LLM_*` is configured, otherwise reports a skipped state and points to deterministic benchmark baseline.
 
 Remaining risks and follow-up backlog:
 
@@ -211,7 +213,7 @@ Remaining risks and follow-up backlog:
 
 ## Next Work Queue
 
-1. Keep public evidence endpoints aligned with the deployed benchmark/intelligence-eval version.
+1. Keep public evidence endpoints aligned with the deployed benchmark/intelligence-eval version and A/B endpoint.
 2. Add a dedicated auth bridge fix for the session tool wrapper that requires `ZENOS_MEMORY_API_KEY`.
 3. Add a type/lint cleanup milestone so build validation no longer depends on ignored errors.
 4. Add real embedding provider or local embedding path after lifecycle reliability remains stable.

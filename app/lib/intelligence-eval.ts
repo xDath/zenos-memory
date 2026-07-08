@@ -1,5 +1,6 @@
 import { buildDagCompactSnapshot, renderBootstrapBlock, CompactRequest } from './compaction';
 import { deterministicEmbedding, cosineSimilarity } from './advanced-memory';
+import { callMemoryLLM, hasMemoryLLM } from './memory-llm';
 import { Memory } from './schema';
 
 function fixtureMemory(id: string, content: string, importance: number, tags: string[] = []): Memory {
@@ -51,7 +52,24 @@ function simulateLowerTierAnswer(prompt: string) {
   return 'Use Zenos Memory as the Agent Context OS. Follow the roadmap source of truth, continue the compact -> bootstrap -> eval loop, preserve pending work, and avoid scope drift before adding new features.';
 }
 
-export function runIntelligenceAmplificationEval() {
+async function callEvalModel(prompt: string) {
+  if (!hasMemoryLLM()) {
+    return { ok: false, skipped: true, reason: 'MEMORY_LLM_* not configured' };
+  }
+  const result = await callMemoryLLM([
+    { role: 'system', content: 'Answer briefly. If bootstrap context is provided, follow it as source of truth. Return JSON: {"answer":"..."}' },
+    { role: 'user', content: prompt },
+  ]);
+  return {
+    ok: result.ok,
+    skipped: false,
+    model: result.model,
+    answer: typeof result.parsed?.answer === 'string' ? result.parsed.answer : (result.content || ''),
+    error: result.error,
+  };
+}
+
+function buildEvalFixture() {
   const messages: CompactRequest['messages'] = [
     { role: 'user', content: 'Tujuan utama kita adalah menaikkan effective intelligence LLM tier bawah di ekosistem Zenos/Hermes.' },
     { role: 'assistant', content: 'Keputusan: upgrade Zenos Memory sebagai Agent Context OS, bukan bikin project baru.' },
@@ -109,38 +127,57 @@ export function runIntelligenceAmplificationEval() {
   const retrievalSimilarity = cosineSimilarity(deterministicEmbedding(retrievalQuery), deterministicEmbedding(relevant));
   const unrelatedSimilarity = cosineSimilarity(deterministicEmbedding(retrievalQuery), deterministicEmbedding(unrelated));
 
+  return {
+    compact,
+    bootstrap,
+    fakeSecret,
+    secretCompact,
+    noMemoryAnswer,
+    withMemoryAnswer,
+    noMemoryScore,
+    withMemoryScore,
+    consumerContract,
+    retrievalQuery,
+    retrievalSimilarity,
+    unrelatedSimilarity,
+  };
+}
+
+export function runIntelligenceAmplificationEval() {
+  const fx = buildEvalFixture();
+
   const cases = [
     {
       name: 'compact_preserves_north_star',
-      pass: containsAll(compact.content, ['effective intelligence', 'LLM', 'Zenos Memory']),
+      pass: containsAll(fx.compact.content, ['effective intelligence', 'LLM', 'Zenos Memory']),
     },
     {
       name: 'compact_preserves_roadmap_discipline',
-      pass: containsAll(compact.content, ['roadmap', 'source of truth']) || containsAll(compact.content, ['scope drift']),
+      pass: containsAll(fx.compact.content, ['roadmap', 'source of truth']) || containsAll(fx.compact.content, ['scope drift']),
     },
     {
       name: 'compact_preserves_pending_work',
-      pass: containsAll(compact.content, ['compact', 'bootstrap', 'eval']),
+      pass: containsAll(fx.compact.content, ['compact', 'bootstrap', 'eval']),
     },
     {
       name: 'bootstrap_is_agent_ready',
-      pass: containsAll(bootstrap, ['Zenos Memory Bootstrap', 'Agent Context OS']) && bootstrap.length <= 5000,
+      pass: containsAll(fx.bootstrap, ['Zenos Memory Bootstrap', 'Agent Context OS']) && fx.bootstrap.length <= 5000,
     },
     {
       name: 'secret_redaction_required',
-      pass: !secretCompact.content.includes(fakeSecret) && secretCompact.content.includes('[REDACTED_OPENAI_KEY]'),
+      pass: !fx.secretCompact.content.includes(fx.fakeSecret) && fx.secretCompact.content.includes('[REDACTED_OPENAI_KEY]'),
     },
     {
       name: 'lower_tier_answer_improves_with_bootstrap',
-      pass: withMemoryScore.score > noMemoryScore.score && withMemoryScore.required_hits >= 5 && noMemoryScore.forbidden_hits > 0,
+      pass: fx.withMemoryScore.score > fx.noMemoryScore.score && fx.withMemoryScore.required_hits >= 5 && fx.noMemoryScore.forbidden_hits > 0,
     },
     {
       name: 'consumer_contract_enforces_scope_and_safety',
-      pass: containsAll(consumerContract, ['bootstrap', 'roadmap', 'scope drift', 'benchmark', 'secrets']),
+      pass: containsAll(fx.consumerContract, ['bootstrap', 'roadmap', 'scope drift', 'benchmark', 'secrets']),
     },
     {
       name: 'retrieval_prefers_relevant_context',
-      pass: retrievalSimilarity > unrelatedSimilarity,
+      pass: fx.retrievalSimilarity > fx.unrelatedSimilarity,
     },
   ];
 
@@ -151,17 +188,17 @@ export function runIntelligenceAmplificationEval() {
     score: passed / cases.length,
     cases,
     lower_tier_simulation: {
-      no_memory: { answer: noMemoryAnswer, ...noMemoryScore },
-      with_memory: { answer: withMemoryAnswer, ...withMemoryScore },
+      no_memory: { answer: fx.noMemoryAnswer, ...fx.noMemoryScore },
+      with_memory: { answer: fx.withMemoryAnswer, ...fx.withMemoryScore },
     },
     retrieval_eval: {
-      query: retrievalQuery,
-      relevant_similarity: Number(retrievalSimilarity.toFixed(4)),
-      unrelated_similarity: Number(unrelatedSimilarity.toFixed(4)),
+      query: fx.retrievalQuery,
+      relevant_similarity: Number(fx.retrievalSimilarity.toFixed(4)),
+      unrelated_similarity: Number(fx.unrelatedSimilarity.toFixed(4)),
       provider: 'deterministic-hashed-embedding-baseline',
     },
-    consumer_contract: consumerContract,
-    compact_preview: compact.content.slice(0, 800),
-    bootstrap_preview: bootstrap.slice(0, 800),
+    consumer_contract: fx.consumerContract,
+    compact_preview: fx.compact.content.slice(0, 800),
+    bootstrap_preview: fx.bootstrap.slice(0, 800),
   };
 }
