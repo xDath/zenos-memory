@@ -34,23 +34,9 @@ export async function POST(request: NextRequest) {
   }
 }
 
-export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
-  const query = searchParams.get('query') || 'test';
-  const namespace = searchParams.get('namespace') || 'default';
-  const limit = parseInt(searchParams.get('limit') || '5');
-
-  try {
-    const engine = getMemoryEngine();
-    const results = await engine.recall({ query, namespace, limit });
-
-    return NextResponse.json({
-      success: true,
-      count: results.length,
-      results,
-      note: 'Use POST with body for full options. This GET is for quick testing.'
-    });
-  } catch (e: any) {
-    return NextResponse.json({ error: e.message }, { status: 500 });
-  }
+export async function GET() {
+  return NextResponse.json({
+    error: 'Unauthorized',
+    message: 'GET recall is disabled. Use signed POST /api/memory/recall.',
+  }, { status: 401 });
 }

@@ -239,3 +239,8 @@ Remaining risks and follow-up backlog:
 ## Production Ready Milestone
 
 Status: complete for production-ready learning deployment. Gates: build pass, lint quiet pass, production smoke pass, benchmark elite-pass, real A/B eval positive, public status aligned, dashboard evidence updated, and `PRODUCTION_READINESS.md` added. Remaining future hardening is optional: stricter provider typing and neural embedding credentials.
+
+## Security Patch — 2026-07-08
+
+- recall GET leak patched: unsigned `GET /api/memory/recall` now returns 401 and instructs clients to use signed POST.
+- Hermes credential auto-capture disabled in repo plugin and active profile plugin; explicit credential storage is required.

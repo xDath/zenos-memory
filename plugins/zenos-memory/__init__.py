@@ -218,27 +218,9 @@ class ZenosMemoryProvider(MemoryProvider):
             try:
                 text = f"User: {user_content}\nAssistant: {assistant_content[:1500]}"
                 self._remember(text, memory_type="conversation", metadata={"source": "turn", "session_id": session_id})
-                # Auto store if user gave a credential
+                # Never auto-store credentials from chat. Use zenos_memory_store_credential explicitly.
                 if self._looks_like_credential(user_content):
-                    # Try to infer service from context, fallback to "unknown"
-                    service = "unknown"
-                    if "vercel" in user_content.lower():
-                        service = "vercel"
-                    elif "openai" in user_content.lower() or "sk-" in user_content:
-                        service = "openai"
-                    elif "github" in user_content.lower() or "ghp_" in user_content:
-                        service = "github"
-                    self._request("POST", "/api/memory/remember", {
-                        "content": user_content.strip(),
-                        "type": "credential",
-                        "namespace": self._namespace,
-                        "metadata": {
-                            "credential_for": service,
-                            "description": "auto-detected from user input",
-                            "is_secret": True,
-                            "source": "auto-detect"
-                        }
-                    })
+                    logger.info("Zenos Memory skipped auto credential capture; explicit credential tool required")
             except Exception:
                 logger.debug("Zenos Memory sync failed", exc_info=True)
 

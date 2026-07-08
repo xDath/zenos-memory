@@ -9,9 +9,9 @@ export async function GET() {
     storage: 'Google Drive OAuth (cloud-owned)',
     auth: 'Etla HMAC protected APIs',
     llm: 'DeepSeek primary via router.etla.me with fallback',
-    version: 'production-ready-v1',
+    version: 'production-ready-v2',
     last_polish: {
-      commit: 'production-ready-v1',
+      commit: 'production-ready-v2',
       focus: 'LLM intelligence amplification roadmap, compact redaction, benchmark v7 eval layer, lower-tier bootstrap simulation, retrieval relevance baseline, and multi-case real LLM A/B endpoint',
       deployed_alias: 'https://zenos-memory.vercel.app',
     },
@@ -27,7 +27,7 @@ export async function GET() {
       examples: ['examples/js/basic.mjs', 'examples/python/basic.py'],
       docs: ['docs/SDK.md', 'docs/HERMES_PLUGIN.md'],
       dashboard_cards: ['Smoke Suite', 'Benchmark V9', 'A/B Eval Endpoint', 'SDK Imports'],
-      production_gates: ['build-pass', 'lint-quiet-pass', 'smoke-pass', 'benchmark-elite-pass', 'ab-eval-positive'],
+      production_gates: ['build-pass', 'lint-quiet-pass', 'smoke-pass', 'benchmark-elite-pass', 'ab-eval-positive', 'recall-get-protected', 'explicit-credential-store-only'],
       readiness_doc: 'PRODUCTION_READINESS.md',
     },
     note: 'This endpoint is JSON evidence. Open / or /dashboard for the visual dashboard.',
@@ -76,6 +76,8 @@ export async function GET() {
       secrets_in_repo: false,
       credential_recall_filtered_by_default: true,
       protected_runtime_endpoints: true,
+      recall_get_disabled: true,
+      auto_credential_capture: false,
     },
   });
 }

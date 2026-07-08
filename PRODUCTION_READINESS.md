@@ -21,11 +21,12 @@ Zenos Memory raises the effective intelligence of LLMs in the Zenos/Hermes ecosy
 - Lint: `npm run lint -- --quiet`
 - Smoke: `node scripts/smoke-production.mjs`
 - Protected benchmark: signed `POST /api/memory/benchmark`
+- Public recall leak check: unsigned `GET /api/memory/recall?...` must return 401
 - Real A/B eval: signed `POST /api/memory/ab-eval`
 
 ## Auth Bridge
 
-Runtime APIs are protected by Etla HMAC signatures using `ETLA_MASTER_SECRET`. The Hermes provider plugin at `/root/.hermes/profiles/zenos/plugins/zenos-memory/__init__.py` signs requests with the same secret. If a session-level wrapper asks for `ZENOS_MEMORY_API_KEY`, treat it as a separate compatibility path; prefer HMAC config or add an env bridge only for that wrapper.
+Runtime APIs are protected by Etla HMAC signatures using `ETLA_MASTER_SECRET`. The Hermes provider plugin at `/root/.hermes/profiles/zenos/plugins/zenos-memory/__init__.py` signs requests with the same secret. Automatic credential capture is disabled; credentials must be stored with explicit credential tools only. If a session-level wrapper asks for `ZENOS_MEMORY_API_KEY`, treat it as a separate compatibility path; prefer HMAC config or add an env bridge only for that wrapper.
 
 ## Embedding Readiness
 
