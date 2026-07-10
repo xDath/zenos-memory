@@ -1,34 +1,39 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
-import { getMemoryEngine } from '../../../lib/memory-engine';
+import { NextRequest } from 'next/server';
 import { buildTemporalGraph } from '../../../lib/advanced-memory';
+import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
+import { errorResponse, requestId } from '../../../lib/errors';
+import { jsonResponse, parsePositiveInteger } from '../../../lib/http';
+import { getMemoryEngine } from '../../../lib/memory-engine';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
   if (!validateApiKey(request)) return unauthorizedResponse();
-
-  const { searchParams } = new URL(request.url);
-  const namespace = searchParams.get('namespace') || 'zenos';
-  const limit = Math.min(500, parseInt(searchParams.get('limit') || '200'));
-
+  const id = requestId(request);
   try {
-    const engine = getMemoryEngine();
-    const memories = await engine.recall({ query: '', namespace, limit, include_low_quality: true, include_secrets: true });
+    const url = new URL(request.url);
+    const namespace = url.searchParams.get('namespace') || 'zenos';
+    const limit = parsePositiveInteger(url.searchParams.get('limit'), 500, 5000);
+    const memories = await getMemoryEngine().recall({
+      query: '',
+      namespace,
+      limit,
+      include_low_quality: true,
+      include_archived: true,
+    });
     const graph = buildTemporalGraph(memories);
-
-    return NextResponse.json({
+    return jsonResponse({
       success: true,
       namespace,
-      graph: {
-        nodes: graph.nodes.slice(0, 120),
-        edges: graph.edges.slice(0, 300),
-        stats: graph.stats,
-      },
+      graph,
       quality: {
-        density: Number((graph.edges.length / Math.max(1, graph.nodes.length)).toFixed(3)),
-        top_nodes: graph.nodes.slice(0, 10).map(n => ({ id: n.id, label: n.label, type: n.type, weight: n.weight })),
+        density: Number((graph.edges.length / Math.max(1, graph.nodes.length)).toFixed(4)),
+        explicit_edges: graph.edges.filter(edge => edge.type !== 'temporal_next').length,
       },
-    });
-  } catch (e: any) {
-    return NextResponse.json({ success: false, error: e.message }, { status: 500 });
+      request_id: id,
+    }, { requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
   }
 }

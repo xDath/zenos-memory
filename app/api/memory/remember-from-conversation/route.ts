@@ -1,31 +1,35 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
+import { z } from 'zod';
+import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
+import { errorResponse, requestId } from '../../../lib/errors';
+import { enforceRateLimit, jsonResponse } from '../../../lib/http';
 import { getMemoryEngine } from '../../../lib/memory-engine';
-import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
+
+const ConversationSchema = z.object({
+  conversation: z.array(z.object({
+    role: z.enum(['user', 'assistant']),
+    content: z.string().min(1).max(64_000),
+  })).min(1).max(500),
+  namespace: z.string().optional(),
+  conversation_id: z.string().max(256).optional(),
+});
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function POST(request: NextRequest) {
-  if (!validateApiKey(request)) {
-    return unauthorizedResponse();
-  }
-
+  if (!validateApiKey(request)) return unauthorizedResponse();
+  const id = requestId(request);
   try {
-    const body = await request.json();
-    const { conversation, namespace, conversation_id } = body;
-
-    if (!Array.isArray(conversation) || conversation.length === 0) {
-      return NextResponse.json({ error: 'conversation array required' }, { status: 400 });
-    }
-
-    const engine = getMemoryEngine();
-    const memories = await engine.rememberFromConversation(conversation, namespace || 'default', conversation_id);
-
-    return NextResponse.json({
-      success: true,
-      count: memories.length,
-      memories,
-      conversation_id,
-    }, { status: 201 });
-
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    enforceRateLimit(request, { bucket: 'conversation-ingest', limit: 30 });
+    const parsed = ConversationSchema.parse(await request.json());
+    const memories = await getMemoryEngine().rememberFromConversation(
+      parsed.conversation,
+      parsed.namespace,
+      parsed.conversation_id,
+    );
+    return jsonResponse({ success: true, memories, count: memories.length, request_id: id }, { status: 201, requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
   }
 }

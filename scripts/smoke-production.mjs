@@ -1,38 +1,97 @@
 #!/usr/bin/env node
 import crypto from 'node:crypto';
+import { ZenosMemoryClient } from '../sdk/js/zenos-memory-client.mjs';
+import { loadZenosRuntimeEnv } from './runtime-env.mjs';
 
-const baseUrl = (process.env.ZENOS_MEMORY_URL || 'https://zenos-memory.vercel.app').replace(/\/$/, '');
-const secret = process.env.ETLA_MASTER_SECRET || process.env.ZENOS_MEMORY_SECRET;
+loadZenosRuntimeEnv();
 
-function sign(method, path) {
-  if (!secret) throw new Error('Set ETLA_MASTER_SECRET or ZENOS_MEMORY_SECRET');
-  const ts = Date.now();
-  const payload = `${ts}:${method.toUpperCase()}:${path}`;
-  const sig = crypto.createHmac('sha256', secret).update(payload).digest('hex');
-  return { 'x-etla-timestamp': String(ts), 'x-etla-signature': sig, 'content-type': 'application/json' };
+const baseUrl = (
+  process.env.ZENOS_MEMORY_SMOKE_URL
+  || process.env.ZENOS_MEMORY_URL
+  || 'https://zenos-memory.vercel.app'
+).replace(/\/$/, '');
+const namespace = `smoke-${Date.now()}`;
+const client = new ZenosMemoryClient({ baseUrl, namespace, clientId: 'zenos-production-smoke' });
+
+async function assertPublicEndpoints() {
+  const health = await fetch(`${baseUrl}/api/health`, { signal: AbortSignal.timeout(15_000), cache: 'no-store' });
+  if (!health.ok || (await health.json()).status !== 'ok') throw new Error('Liveness endpoint failed');
+  const status = await fetch(`${baseUrl}/api/memory/public-status`, { signal: AbortSignal.timeout(15_000), cache: 'no-store' });
+  const payload = await status.json();
+  if (!status.ok || payload.version !== '2.0.0' || payload.security?.raw_secret_storage !== false) {
+    throw new Error('Public capability endpoint failed');
+  }
 }
 
-async function request(method, path, body) {
-  const res = await fetch(baseUrl + path, { method, headers: sign(method, path), body: body ? JSON.stringify(body) : undefined });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`${method} ${path} failed: ${res.status} ${JSON.stringify(data)}`);
-  return data;
+async function main() {
+  await assertPublicEndpoints();
+  const idempotencyKey = `smoke-${crypto.randomUUID()}`;
+  const content = 'Production smoke confirms Drive event persistence and scoped authentication.';
+  const remembered = await client.remember(content, {
+    type: 'event',
+    namespace,
+    metadata: { tags: ['smoke'], importance: 2 },
+    idempotencyKey,
+  });
+  const memory = remembered.memory;
+  if (!memory?.id) throw new Error('Remember did not return a memory');
+
+  const duplicate = await client.remember(content, {
+    type: 'event',
+    namespace,
+    metadata: { tags: ['smoke'], importance: 2 },
+    idempotencyKey,
+  });
+  if (duplicate.memory?.id !== memory.id) throw new Error('Idempotency check failed');
+
+  const recalled = await client.recall('Drive event persistence authentication', { namespace, limit: 5 });
+  if (!recalled.results?.some(item => item.id === memory.id)) throw new Error('Recall check failed');
+
+  const edited = await client.edit(memory.id, {
+    content: 'Production smoke confirms Vercel compute, Drive event persistence, recall, and scoped authentication.',
+  }, { namespace, expectedVersion: memory.metadata.version });
+  if (edited.memory?.metadata?.version !== memory.metadata.version + 1) throw new Error('Optimistic update check failed');
+
+  const stats = await client.stats({ namespace });
+  const activeCount = Number(stats.stats?.total || 0) - Number(stats.stats?.archived || 0);
+  if (activeCount !== 1) {
+    throw new Error(`Stats check failed: ${JSON.stringify(stats.stats)}`);
+  }
+
+  const readiness = await client.health({ namespace });
+  if (!readiness.ready) throw new Error('Authenticated readiness check failed');
+  const architecture = readiness.readiness?.architecture || readiness.architecture;
+  if (baseUrl.includes('vercel.app') && architecture !== 'vercel-compute-drive-event-store') {
+    throw new Error(`Production endpoint is not using the Drive event architecture: ${architecture || 'unknown'}`);
+  }
+
+  await client.forget(memory.id, {
+    namespace,
+    expectedVersion: edited.memory.metadata.version,
+  });
+  const afterDelete = await client.recall('Drive event persistence authentication', { namespace, limit: 5 });
+  if (afterDelete.results?.some(item => item.id === memory.id)) throw new Error('Archive check failed');
+
+  process.stdout.write(`${JSON.stringify({
+    ok: true,
+    base_url: baseUrl,
+    namespace,
+    architecture,
+    checks: [
+      'liveness',
+      'public-capabilities',
+      'token-exchange',
+      'idempotency',
+      'recall',
+      'optimistic-update',
+      'stats',
+      'readiness',
+      'archive',
+    ],
+  }, null, 2)}\n`);
 }
 
-async function publicStatus() {
-  const res = await fetch(baseUrl + '/api/memory/public-status');
-  const data = await res.json();
-  const allowedStatuses = new Set(['educational-demo', 'production-ready-learning-deployment']);
-  if (!data.success || !allowedStatuses.has(data.status)) throw new Error('public-status failed');
-  return data;
-}
-
-const checks = [];
-checks.push(['public-status', await publicStatus()]);
-checks.push(['hybrid-recall', await request('POST', '/api/memory/hybrid-recall', { query: 'Zenos Memory', namespace: 'zenos', limit: 2 })]);
-checks.push(['mutation-plan', await request('POST', '/api/memory/mutation-plan', { content: 'Zenos Memory smoke test current state.', namespace: 'zenos', limit: 20 })]);
-checks.push(['timeline', await request('GET', '/api/memory/timeline?namespace=zenos&limit=3')]);
-checks.push(['episodes', await request('GET', '/api/memory/episodes?namespace=zenos&limit=3')]);
-checks.push(['benchmark', await request('POST', '/api/memory/benchmark', { skip_llm: true })]);
-
-console.log(JSON.stringify({ ok: true, baseUrl, checks: checks.map(([name, data]) => ({ name, count: data.count ?? data.case_count ?? null, status: data.status ?? 'ok' })) }, null, 2));
+void main().catch(error => {
+  process.stderr.write(`Production smoke failed: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
+});

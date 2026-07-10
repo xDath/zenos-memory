@@ -1,11 +1,25 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
+import { z } from 'zod';
+import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
+import { errorResponse, requestId } from '../../../lib/errors';
+import { enforceRateLimit, jsonResponse } from '../../../lib/http';
 import { getMemoryEngine } from '../../../lib/memory-engine';
-import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
+
+const BackupSchema = z.object({ namespace: z.string().optional() });
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function POST(request: NextRequest) {
   if (!validateApiKey(request)) return unauthorizedResponse();
-  const { targetNamespace = "backup" } = await request.json();
-  const engine = getMemoryEngine();
-  const result = await engine.backupMemories(targetNamespace);
-  return NextResponse.json({ success: true, result });
+  const id = requestId(request);
+  try {
+    enforceRateLimit(request, { bucket: 'backup', limit: 5, windowMs: 60_000 });
+    const body = await request.json().catch(() => ({}));
+    const parsed = BackupSchema.parse(body);
+    const result = await getMemoryEngine().backupMemories(parsed.namespace);
+    return jsonResponse({ success: true, backup: result, request_id: id }, { status: 201, requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
+  }
 }

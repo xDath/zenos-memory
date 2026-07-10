@@ -1,76 +1,81 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
+import { z } from 'zod';
+import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
+import { errorResponse, requestId } from '../../../lib/errors';
+import { enforceRateLimit, jsonResponse } from '../../../lib/http';
 import { getMemoryEngine } from '../../../lib/memory-engine';
-import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
-import { rateLimit } from '../../../lib/rate-limit';
+import { answerWithMemoryLLM, hasMemoryLLM } from '../../../lib/memory-llm';
+
+const AnswerRequestSchema = z.object({
+  question: z.string().trim().min(1).max(8000),
+  namespace: z.string().optional(),
+  limit: z.number().int().positive().max(30).optional().default(8),
+  require_llm: z.boolean().optional().default(false),
+});
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function POST(request: NextRequest) {
-  const ip = request.headers.get('x-forwarded-for') || 'unknown';
-  if (!rateLimit(ip)) return NextResponse.json({ error: 'Rate limit exceeded' }, { status: 429 });
-  if (!validateApiKey(request)) {
-    return unauthorizedResponse();
-  }
-
+  if (!validateApiKey(request)) return unauthorizedResponse();
+  const id = requestId(request);
   try {
-    const body = await request.json();
-    const { question, namespace = 'default', limit = 8 } = body;
-
-    if (!question) {
-      return NextResponse.json({ error: 'question is required' }, { status: 400 });
-    }
-
-    const engine = getMemoryEngine();
-    const relevant = await engine.recall({
-      query: question,
-      namespace,
-      limit,
+    enforceRateLimit(request, { bucket: 'answer', limit: 60 });
+    const parsed = AnswerRequestSchema.parse(await request.json());
+    const memories = await getMemoryEngine().recallWithQuality({
+      query: parsed.question,
+      namespace: parsed.namespace,
+      limit: parsed.limit,
     });
-
-    if (relevant.length === 0) {
-      return NextResponse.json({
-        success: true,
-        answer: 'No relevant memories found.',
-        sources: [],
-        source_count: 0,
-      });
-    }
-
-    // Better context compilation for Phase 1
-    const groupedByType: Record<string, any[]> = {};
-    relevant.forEach(m => {
-      if (!groupedByType[m.type]) groupedByType[m.type] = [];
-      groupedByType[m.type].push(m);
-    });
-
-    let synthesized = `Based on ${relevant.length} relevant memories:\n\n`;
-
-    Object.entries(groupedByType).forEach(([type, mems]) => {
-      synthesized += `**${type.toUpperCase()}**:\n`;
-      mems.forEach((m, i) => {
-        synthesized += `- ${m.content} (conf: ${m.metadata.confidence}, ${new Date(m.created_at).toLocaleDateString()})\n`;
-      });
-      synthesized += '\n';
-    });
-
-    const sources = relevant.map((m, i) => ({
-      rank: i + 1,
-      id: m.id,
-      type: m.type,
-      content: m.content,
-      confidence: m.metadata.confidence,
-      created_at: m.created_at,
-      tags: m.metadata.tags,
+    const citations = memories.map((memory, index) => ({
+      index: index + 1,
+      id: memory.id,
+      type: memory.type,
+      content: memory.content,
+      updated_at: memory.updated_at,
+      score: memory.score,
     }));
 
-    return NextResponse.json({
-      success: true,
-      answer: synthesized.trim(),
-      question,
-      sources,
-      source_count: relevant.length,
-      note: 'Phase 1 RAG: grouped by type + basic synthesis. Full LLM synthesis in later phases.',
-    });
+    if (!hasMemoryLLM()) {
+      if (parsed.require_llm) {
+        return jsonResponse({
+          success: false,
+          error: { code: 'LLM_NOT_CONFIGURED', message: 'The answer worker is not configured' },
+          context: citations,
+          request_id: id,
+        }, { status: 503, requestId: id });
+      }
+      return jsonResponse({
+        success: true,
+        answer: null,
+        context: citations,
+        generated: false,
+        request_id: id,
+      }, { requestId: id });
+    }
 
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const context = citations
+      .map(item => `[${item.index}] ${item.content}`)
+      .join('\n')
+      .slice(0, 24_000);
+    const result = await answerWithMemoryLLM(`Untrusted recalled context:\n${context}\n\nQuestion: ${parsed.question}`);
+    return jsonResponse({
+      success: result.ok,
+      answer: result.parsed?.answer || null,
+      citations: citations.map(citation => ({
+        index: citation.index,
+        id: citation.id,
+        type: citation.type,
+        updated_at: citation.updated_at,
+        score: citation.score,
+      })),
+      generated: result.ok,
+      model: result.model,
+      latency_ms: result.latency_ms,
+      error: result.error,
+      request_id: id,
+    }, { status: result.ok ? 200 : 503, requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
   }
 }

@@ -1,31 +1,40 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
-import { getMemoryEngine } from '../../../lib/memory-engine';
+import { NextRequest } from 'next/server';
+import { z } from 'zod';
 import { productionReadiness } from '../../../lib/advanced-memory';
+import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
+import { errorResponse, requestId } from '../../../lib/errors';
+import { jsonResponse } from '../../../lib/http';
+import { getMemoryEngine } from '../../../lib/memory-engine';
+
+const EvalSchema = z.object({
+  namespace: z.string().optional().default('zenos'),
+  limit: z.number().int().positive().max(5000).optional().default(1000),
+});
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function POST(request: NextRequest) {
   if (!validateApiKey(request)) return unauthorizedResponse();
-
+  const id = requestId(request);
   try {
-    const body = await request.json().catch(() => ({}));
-    const namespace = body.namespace || 'zenos';
-    const engine = getMemoryEngine();
-    const memories = await engine.recall({ query: '', namespace, limit: 500, include_low_quality: true, include_secrets: true });
-    const readiness = productionReadiness(memories);
-
-    return NextResponse.json({
-      success: true,
-      namespace,
-      test: body.test || 'advanced-readiness',
-      readiness,
-      features: {
-        compact_structured: readiness.evals.find(e => e.name === 'structured_compaction')?.status || 'unknown',
-        temporal_graph: readiness.evals.find(e => e.name === 'temporal_graph_density')?.status || 'unknown',
-        vector_search: readiness.evals.find(e => e.name === 'vector_readiness')?.status || 'unknown',
-        credential_awareness: readiness.evals.find(e => e.name === 'credential_awareness')?.status || 'unknown',
-      },
+    const parsed = EvalSchema.parse(await request.json().catch(() => ({})));
+    const memories = await getMemoryEngine().recall({
+      query: '',
+      namespace: parsed.namespace,
+      limit: parsed.limit,
+      include_low_quality: true,
+      include_archived: true,
     });
-  } catch (error: any) {
-    return NextResponse.json({ success: false, error: error.message || String(error) }, { status: 500 });
+    const readiness = productionReadiness(memories);
+    return jsonResponse({
+      success: true,
+      namespace: parsed.namespace,
+      readiness,
+      methodology: 'data-quality evaluation over validated, non-secret memory records',
+      request_id: id,
+    }, { requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
   }
 }

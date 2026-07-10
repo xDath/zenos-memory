@@ -1,33 +1,32 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { RememberRequestSchema } from '../../../lib/schema';
+import { NextRequest } from 'next/server';
+import { z } from 'zod';
+import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
+import { errorResponse, requestId } from '../../../lib/errors';
+import { enforceRateLimit, jsonResponse } from '../../../lib/http';
 import { getMemoryEngine } from '../../../lib/memory-engine';
-import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
+import { RememberRequestSchema } from '../../../lib/schema';
+
+const BatchSchema = z.object({
+  memories: z.array(RememberRequestSchema).min(1).max(250),
+});
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function POST(request: NextRequest) {
-  if (!validateApiKey(request)) {
-    return unauthorizedResponse();
-  }
-
+  if (!validateApiKey(request)) return unauthorizedResponse();
+  const id = requestId(request);
   try {
+    enforceRateLimit(request, { bucket: 'remember-batch', limit: 30 });
     const body = await request.json();
-    const requests = Array.isArray(body) ? body : body.requests;
-
-    if (!Array.isArray(requests) || requests.length === 0) {
-      return NextResponse.json({ error: 'Array of remember requests required' }, { status: 400 });
-    }
-
-    const parsed = requests.map(r => RememberRequestSchema.parse(r));
-
-    const engine = getMemoryEngine();
-    const memories = await engine.rememberBatch(parsed);
-
-    return NextResponse.json({
-      success: true,
-      count: memories.length,
-      memories,
-    }, { status: 201 });
-
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const parsed = BatchSchema.parse(Array.isArray(body) ? { memories: body } : body);
+    const batchKey = request.headers.get('idempotency-key') || undefined;
+    const memories = await getMemoryEngine().rememberBatch(parsed.memories.map((memory, index) => ({
+      ...memory,
+      idempotency_key: memory.idempotency_key || (batchKey ? `${batchKey}:${index}` : undefined),
+    })));
+    return jsonResponse({ success: true, memories, count: memories.length, request_id: id }, { status: 201, requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
   }
 }

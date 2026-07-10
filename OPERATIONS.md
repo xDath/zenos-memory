@@ -1,166 +1,156 @@
-# Zenos Memory Operations Guide
+# Zenos Memory Operations
 
-This is the quick future-self guide for running Zenos Memory.
-
-## Normal Usage
-
-Do not open or edit this repo for daily memory usage. Use Hermes/Zenos normally.
-
-Hermes consumes production API:
+## Production topology
 
 ```text
-https://zenos-memory.vercel.app
+Hermes on VPS -> https://zenos-memory.vercel.app -> Google Drive
 ```
 
-Profile config:
+The VPS should not run `zenos-memory.service` in normal production. The Vercel deployment handles compute and Google Drive stores canonical data.
 
-```text
-/root/.hermes/profiles/zenos/config.yaml
-memory.provider = zenos-memory
-```
+## Health checks
 
-Plugin:
-
-```text
-/root/.hermes/profiles/zenos/plugins/zenos-memory/__init__.py
-```
-
-## Where Memory Lives
-
-Memory data lives in Google Drive through OAuth, not in this repo.
-
-Main runtime:
-
-```text
-Vercel API -> Google Drive OAuth -> zenos-memory structured folder
-```
-
-## Where Secrets Live
-
-Never commit secrets.
-
-Local helper secrets:
-
-```text
-/root/.zenos-secrets/vercel-token.txt
-/root/.zenos-secrets/google-oauth-refresh-token.txt
-```
-
-Hermes client secret:
-
-```text
-/root/.hermes/profiles/zenos/zenos-memory.json
-```
-
-Production secrets:
-
-```text
-Vercel Project Settings -> Environment Variables
-```
-
-## Deploy
+Public liveness:
 
 ```bash
-cd /root/openclaw-projects/zenos-memory
-npm run build
-npx vercel --prod --token $(cat /root/.zenos-secrets/vercel-token.txt) --yes
+curl -fsS https://zenos-memory.vercel.app/api/health
 ```
 
-## Push to GitHub
+Public capability metadata:
 
 ```bash
-cd /root/openclaw-projects/zenos-memory
-git status
-git add <safe-files-only>
-git commit -m "message"
+curl -fsS https://zenos-memory.vercel.app/api/memory/public-status
+```
+
+Authenticated readiness is available at `/api/memory/health-check` through the SDK or Hermes provider.
+
+## Release procedure
+
+1. Run the full local gate.
+2. Run the real Google Drive cloud smoke test.
+3. Confirm legacy data migration and snapshot verification.
+4. Commit and push `master`.
+5. Wait for the GitHub-linked Vercel production deployment.
+6. Run production smoke against the Vercel URL.
+7. Point Hermes back to the Vercel URL.
+8. Stop and disable the VPS fallback service.
+
+Commands:
+
+```bash
+npm run check
+npm run smoke:cloud
+npm run migrate:legacy-vercel -- zenos
 git push origin master
+ZENOS_MEMORY_URL=https://zenos-memory.vercel.app npm run smoke:prod
 ```
 
-Before pushing:
+## Daily maintenance
+
+Vercel Cron calls:
+
+```text
+/api/memory/scheduler?namespace=zenos&backup=true&store_report=false
+```
+
+The job:
+
+- acquires a Drive-backed maintenance lease;
+- refreshes the namespace event stream;
+- applies temporal decay where required;
+- creates an immutable canonical snapshot;
+- creates search and graph indexes;
+- creates a portable checksum-verified backup;
+- runs memory health checks.
+
+## Recovery
+
+Canonical recovery requires no VPS disk.
+
+1. Find the highest-cursor valid snapshot.
+2. Verify its checksum.
+3. List event month folders at or after the snapshot cursor month.
+4. Validate and sort delta events by cursor.
+5. Replay events into an empty materialized view.
+6. Ignore corrupt snapshots/events and retain the last verified state.
+
+The application performs these steps automatically on a cold function instance.
+
+## Manual snapshot
+
+Using the authenticated client:
 
 ```bash
-git grep -nE 'sk-|vcp_|ghp_|GOCSPX-|private_key|BEGIN PRIVATE KEY' || true
+npm run cli -- backup zenos
 ```
 
-## Smoke Test
+Or call:
 
-Public:
+```text
+POST /api/memory/backup
+{"namespace":"zenos"}
+```
+
+## Migration tools
+
+Legacy Vercel export to Drive events:
 
 ```bash
-curl -s https://zenos-memory.vercel.app/api/memory/public-status
-curl -I https://zenos-memory.vercel.app
+npm run migrate:legacy-vercel -- zenos
 ```
 
-Protected tests require Etla HMAC signature. Use Hermes tools when possible:
+Drive event initialization or compaction:
 
-```text
-zenos_memory_dashboard
-zenos_memory_benchmark
-zenos_memory_bootstrap
-zenos_memory_search
+```bash
+npm run migrate:drive-events -- zenos
 ```
 
-## Key Endpoints
+These commands print counts and identifiers only. They do not print memory contents or credentials.
 
-```text
-/                                  public product dashboard
-/dashboard                         same dashboard alias
-/api/memory/public-status          public safe status
-/api/memory/compact                LLM structured handoff
-/api/memory/bootstrap              recovery context
-/api/memory/vector                 vector retrieval
-/api/memory/graph                  temporal graph
-/api/memory/graph-query            graph + vector retrieval
-/api/memory/graph-mermaid          Mermaid graph text
-/api/memory/maintain               background maintainer
-/api/memory/scheduler              cron maintenance
-/api/memory/benchmark              regression benchmark
-/api/memory/lock                   persistent lock audit
-/api/memory/merge                  dedup/merge planner
+## Hermes cutover
+
+The Hermes profile file should contain:
+
+```json
+{
+  "base_url": "https://zenos-memory.vercel.app",
+  "namespace": "zenos"
+}
 ```
 
-## If Something Breaks
+The secret remains in the private profile configuration. Restart `hermes-gateway.service` after changing the URL.
 
-1. Check Vercel deployment: `npx vercel ls zenos-memory --token $(cat /root/.zenos-secrets/vercel-token.txt)`
-2. Check public status endpoint.
-3. Check Vercel envs.
-4. Check Google OAuth access / folder permissions.
-5. Run `npm run build` locally.
-6. Check Hermes plugin config.
+## Failure modes
 
-## Should We Delete This Repo?
+### Drive OAuth failure
 
-No.
+Symptoms: readiness failure, token refresh errors, event append failure.
 
-Keep it as infrastructure source code. Daily work should consume the deployed service, not rebuild it.
+Actions:
 
-If disk cleanup is needed, remove generated folders only:
+- verify OAuth client ID, client secret, refresh token, and Drive folder setting in Vercel;
+- refresh or re-authorize OAuth;
+- do not switch to an ephemeral filesystem as canonical storage.
 
-```text
-.next/
-.vercel/output/
-node_modules/   # only if you are okay reinstalling
-```
+### Lease contention
 
-Do not remove:
+Symptoms: HTTP 409 or write timeout.
 
-```text
-app/
-scripts/
-README.md
-CREDENTIALS.md
-OPERATIONS.md
-/root/.zenos-secrets/
-```
+Actions:
 
-## Final State
+- allow the active lease to expire;
+- inspect the namespace coordination file;
+- verify Vercel functions are not exceeding their duration;
+- avoid manually editing coordination files while writes are active.
 
-This project is done-final as production infrastructure. Future changes should be:
+### Invalid snapshot
 
-- bug fix
-- small endpoint upgrade
-- UI polish
-- model/embedding provider change
-- operational secret rotation
+The loader skips it automatically. Create a new snapshot from the previous verified snapshot plus delta events.
 
-Not a full rebuild.
+### Vercel outage
+
+Canonical data remains in Drive. Hermes memory calls may temporarily fail, but no memory data is lost. A local fallback can be started manually only during an extended outage.
+
+## Cost and VPS footprint
+
+Normal VPS footprint is limited to the Hermes client and short HTTP calls. Zenos Memory has no always-on Node process, SQLite database, maintenance timer, or graph compute on the VPS.

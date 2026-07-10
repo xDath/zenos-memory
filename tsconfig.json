@@ -30,5 +30,11 @@
     ".next/dev/types/**/*.ts",
     "**/*.mts"
   ],
-  "exclude": ["node_modules"]
+  "exclude": [
+    "node_modules",
+    "app/lib/zenos-runtime.ts",
+    "app/lib/zenos-runtime-executor.ts",
+    "scripts/smoke-runtime.mjs",
+    "scripts/zenos-runtime-cli.mjs"
+  ]
 }

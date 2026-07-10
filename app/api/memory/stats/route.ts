@@ -1,24 +1,20 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
+import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
+import { errorResponse, requestId } from '../../../lib/errors';
+import { jsonResponse } from '../../../lib/http';
 import { getMemoryEngine } from '../../../lib/memory-engine';
-import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
-  if (!validateApiKey(request)) {
-    return unauthorizedResponse();
-  }
-
+  if (!validateApiKey(request)) return unauthorizedResponse();
+  const id = requestId(request);
   try {
-    const { searchParams } = new URL(request.url);
-    const namespace = searchParams.get('namespace') || undefined;
-
-    const engine = getMemoryEngine();
-    const stats = await engine.getStats(namespace);
-
-    return NextResponse.json({
-      success: true,
-      stats,
-    });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const namespace = new URL(request.url).searchParams.get('namespace') || undefined;
+    const stats = await getMemoryEngine().getStats(namespace);
+    return jsonResponse({ success: true, stats, request_id: id }, { requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
   }
 }

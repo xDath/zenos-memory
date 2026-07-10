@@ -1,66 +1,56 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getMemoryEngine } from '../../../lib/memory-engine';
-import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
-import { rateLimit } from '../../../lib/rate-limit';
+import { NextRequest } from 'next/server';
+import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
 import { BootstrapRequestSchema, defaultBootstrapQueries, renderBootstrapBlock } from '../../../lib/compaction';
+import { errorResponse, requestId } from '../../../lib/errors';
+import { enforceRateLimit, jsonResponse } from '../../../lib/http';
+import { getMemoryEngine } from '../../../lib/memory-engine';
 import { Memory } from '../../../lib/schema';
 
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
 export async function POST(request: NextRequest) {
-  const ip = request.headers.get('x-forwarded-for') || 'unknown';
-  if (!rateLimit(ip)) return NextResponse.json({ error: 'Rate limit exceeded' }, { status: 429 });
   if (!validateApiKey(request)) return unauthorizedResponse();
-
+  const id = requestId(request);
   try {
-    const body = await request.json();
-    const parsed = BootstrapRequestSchema.parse(body);
+    enforceRateLimit(request, { bucket: 'bootstrap', limit: 90 });
+    const parsed = BootstrapRequestSchema.parse(await request.json());
     const engine = getMemoryEngine();
-    const byId = new Map<string, Memory>();
-
-    // Prioritize recent compacts/insights for structured handoff (Phase 2)
-    try {
-      const compacts = await engine.recall({
-        query: "compact handoff bootstrap recovery structured",
-        namespace: parsed.namespace,
-        limit: 3,
-        type: "insight",
-      });
-      for (const mem of compacts) byId.set(mem.id, mem);
-    } catch {}
-
-    for (const query of defaultBootstrapQueries(parsed.queries)) {
-      const results = await engine.recall({
+    const selected = new Map<string, Memory>();
+    const queries = [
+      'structured compact handoff recovery current goal pending decisions',
+      ...defaultBootstrapQueries(parsed.queries),
+    ];
+    for (const query of queries.slice(0, 8)) {
+      const results = await engine.recallWithQuality({
         query,
         namespace: parsed.namespace,
         limit: parsed.limit,
       });
-      for (const mem of results) byId.set(mem.id, mem);
+      for (const result of results) selected.set(result.id, result);
     }
-
-    const memories = Array.from(byId.values()).sort((a, b) => {
-      const ia = a.metadata.importance || 0;
-      const ib = b.metadata.importance || 0;
-      if (ib !== ia) return ib - ia;
-      return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
-    });
+    const memories = [...selected.values()]
+      .sort((left, right) => {
+        const importance = (right.metadata.importance || 0) - (left.metadata.importance || 0);
+        return importance || right.updated_at.localeCompare(left.updated_at);
+      })
+      .slice(0, parsed.limit);
     const bootstrap = renderBootstrapBlock(memories, parsed.namespace, parsed.max_chars);
-
-    return NextResponse.json({
+    const sources = memories.map(memory => ({
+      id: memory.id,
+      type: memory.type,
+      importance: memory.metadata.importance,
+      tags: memory.metadata.tags,
+      updated_at: memory.updated_at,
+    }));
+    return jsonResponse({
       success: true,
       bootstrap,
-      count: memories.length,
-      sources: memories.slice(0, parsed.limit).map((m) => ({
-        id: m.id,
-        type: m.type,
-        content: m.content,
-        importance: m.metadata.importance,
-        tags: m.metadata.tags,
-        updated_at: m.updated_at,
-      })),
-    });
-  } catch (error: any) {
-    if (error.name === 'ZodError') {
-      return NextResponse.json({ error: 'Validation error', details: error.errors }, { status: 400 });
-    }
-    return NextResponse.json({ error: 'Failed to bootstrap', details: error.message }, { status: 500 });
+      count: sources.length,
+      sources,
+      request_id: id,
+    }, { requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
   }
 }

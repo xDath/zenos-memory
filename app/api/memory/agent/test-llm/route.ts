@@ -1,25 +1,34 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { validateApiKey, unauthorizedResponse } from '../../../../lib/auth';
-import { compactWithLLM, extractWithLLM, hasMemoryLLM } from '../../../../lib/memory-llm';
+import { NextRequest } from 'next/server';
+import { z } from 'zod';
+import { unauthorizedResponse, validateApiKey } from '../../../../lib/auth';
+import { errorResponse, requestId } from '../../../../lib/errors';
+import { jsonResponse } from '../../../../lib/http';
+import { answerWithMemoryLLM, hasMemoryLLM } from '../../../../lib/memory-llm';
+
+const TestSchema = z.object({ prompt: z.string().max(2000).optional() });
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function POST(request: NextRequest) {
   if (!validateApiKey(request)) return unauthorizedResponse();
-
+  const id = requestId(request);
   try {
-    const body = await request.json().catch(() => ({}));
-    const text = body.text || 'User wants Zenos Memory to become a top-tier memory OS with Google Drive OAuth, auto compact, bootstrap recovery, semantic search, temporal graph, and evals.';
-    const mode = body.mode || 'extract';
-
     if (!hasMemoryLLM()) {
-      return NextResponse.json({ success: false, error: 'Memory LLM env is not configured' }, { status: 500 });
+      return jsonResponse({ success: false, configured: false, request_id: id }, { status: 503, requestId: id });
     }
-
-    const result = mode === 'compact'
-      ? await compactWithLLM(text)
-      : await extractWithLLM(text);
-
-    return NextResponse.json({ success: result.ok, mode, result });
-  } catch (error: any) {
-    return NextResponse.json({ success: false, error: error.message || String(error) }, { status: 500 });
+    const parsed = TestSchema.parse(await request.json().catch(() => ({})));
+    const result = await answerWithMemoryLLM(parsed.prompt || 'Reply with a short confirmation that the memory worker is reachable.');
+    return jsonResponse({
+      success: result.ok,
+      configured: true,
+      model: result.model,
+      latency_ms: result.latency_ms,
+      output_valid: Boolean(result.parsed?.answer),
+      error: result.error,
+      request_id: id,
+    }, { status: result.ok ? 200 : 503, requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
   }
 }

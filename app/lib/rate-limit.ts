@@ -1,15 +1,38 @@
-const requests = new Map<string, number[]>();
+interface Bucket {
+  timestamps: number[];
+  lastSeen: number;
+}
 
-export function rateLimit(ip: string, limit = 60, windowMs = 60000) {
+const buckets = new Map<string, Bucket>();
+let requestsSinceCleanup = 0;
+
+function cleanup(now: number, maxAgeMs: number): void {
+  for (const [key, bucket] of buckets) {
+    if (now - bucket.lastSeen > maxAgeMs) buckets.delete(key);
+  }
+}
+
+export function rateLimit(identity: string, limit = 120, windowMs = 60_000): boolean {
   const now = Date.now();
-  const timestamps = requests.get(ip) || [];
-  const recent = timestamps.filter(t => now - t < windowMs);
-  
-  if (recent.length >= limit) {
+  requestsSinceCleanup += 1;
+  if (requestsSinceCleanup >= 500) {
+    cleanup(now, Math.max(windowMs * 2, 120_000));
+    requestsSinceCleanup = 0;
+  }
+
+  const existing = buckets.get(identity) || { timestamps: [], lastSeen: now };
+  existing.timestamps = existing.timestamps.filter(timestamp => now - timestamp < windowMs);
+  existing.lastSeen = now;
+  if (existing.timestamps.length >= limit) {
+    buckets.set(identity, existing);
     return false;
   }
-  
-  recent.push(now);
-  requests.set(ip, recent);
+  existing.timestamps.push(now);
+  buckets.set(identity, existing);
   return true;
+}
+
+export function resetRateLimitsForTests(): void {
+  buckets.clear();
+  requestsSinceCleanup = 0;
 }

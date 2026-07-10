@@ -1,41 +1,93 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
-import { createLockLease } from '../../../lib/memory-maintainer';
+import { NextRequest } from 'next/server';
+import { z } from 'zod';
+import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
+import { errorResponse, requestId } from '../../../lib/errors';
+import { jsonResponse } from '../../../lib/http';
 import { getMemoryEngine } from '../../../lib/memory-engine';
+
+const AcquireSchema = z.object({
+  action: z.literal('acquire').optional().default('acquire'),
+  resource: z.string().trim().min(1).max(160),
+  owner: z.string().trim().min(1).max(160),
+  namespace: z.string().optional().default('zenos'),
+  ttl_ms: z.number().int().min(5_000).max(300_000).optional().default(30_000),
+});
+const RenewSchema = z.object({
+  action: z.literal('renew'),
+  token: z.string().uuid(),
+  owner: z.string().trim().min(1).max(160),
+  namespace: z.string().optional().default('zenos'),
+  resource: z.string().trim().min(1).max(160),
+  ttl_ms: z.number().int().min(5_000).max(300_000).optional().default(30_000),
+});
+const ReleaseSchema = z.object({
+  action: z.literal('release'),
+  token: z.string().uuid(),
+  owner: z.string().trim().min(1).max(160),
+  namespace: z.string().optional().default('zenos'),
+  resource: z.string().trim().min(1).max(160),
+});
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function POST(request: NextRequest) {
   if (!validateApiKey(request)) return unauthorizedResponse();
-  const body = await request.json().catch(() => ({}));
-  const owner = body.owner || 'zenos-memory';
-  const namespace = body.namespace || 'zenos';
-  const ttlMs = Math.min(300000, Math.max(5000, Number(body.ttl_ms || 30000)));
-  const lease = createLockLease(owner, ttlMs);
+  const id = requestId(request);
+  try {
+    const body = await request.json();
+    const action = typeof body?.action === 'string' ? body.action : 'acquire';
+    const engine = getMemoryEngine();
 
-  // Persist lock lease as event memory for auditability / optimistic coordination.
-  const engine = getMemoryEngine();
-  await engine.remember({
-    content: JSON.stringify(lease),
-    type: 'event',
-    namespace,
-    metadata: {
-      source: 'zenos-lock-lease',
-      confidence: 1,
-      importance: 7,
-      tags: ['lock', 'lease', 'concurrency'],
-      expires_at: lease.expires_at,
-    },
-  });
+    if (action === 'renew') {
+      const parsed = RenewSchema.parse(body);
+      const lease = await engine.renewLease(
+        parsed.token,
+        parsed.owner,
+        parsed.ttl_ms,
+        parsed.namespace,
+        parsed.resource,
+      );
+      return jsonResponse({ success: Boolean(lease), lease, request_id: id }, {
+        status: lease ? 200 : 409,
+        requestId: id,
+      });
+    }
+    if (action === 'release') {
+      const parsed = ReleaseSchema.parse(body);
+      const released = await engine.releaseLease(
+        parsed.token,
+        parsed.owner,
+        parsed.namespace,
+        parsed.resource,
+      );
+      return jsonResponse({ success: released, released, request_id: id }, {
+        status: released ? 200 : 404,
+        requestId: id,
+      });
+    }
 
-  return NextResponse.json({ success: true, lease, mode: 'drive-audited-optimistic-lease' });
+    const parsed = AcquireSchema.parse(body);
+    const lease = await engine.acquireLease(parsed.resource, parsed.owner, parsed.namespace, parsed.ttl_ms);
+    return jsonResponse({
+      success: Boolean(lease),
+      acquired: Boolean(lease),
+      lease,
+      request_id: id,
+    }, { status: lease ? 201 : 409, requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
+  }
 }
 
 export async function GET(request: NextRequest) {
   if (!validateApiKey(request)) return unauthorizedResponse();
-  const { searchParams } = new URL(request.url);
-  const namespace = searchParams.get('namespace') || 'zenos';
-  const engine = getMemoryEngine();
-  const locks = await engine.recall({ query: 'lock lease concurrency', namespace, limit: 20, type: 'event', include_low_quality: true });
-  const now = Date.now();
-  const active = locks.filter(l => l.metadata.expires_at && new Date(l.metadata.expires_at).getTime() > now);
-  return NextResponse.json({ success: true, namespace, active_count: active.length, active_locks: active });
+  const id = requestId(request);
+  try {
+    const namespace = new URL(request.url).searchParams.get('namespace') || undefined;
+    const leases = await getMemoryEngine().listLeases(namespace);
+    return jsonResponse({ success: true, leases, count: leases.length, request_id: id }, { requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
+  }
 }

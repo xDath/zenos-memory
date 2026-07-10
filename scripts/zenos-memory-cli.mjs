@@ -1,59 +1,82 @@
 #!/usr/bin/env node
-import crypto from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { ZenosMemoryClient } from '../sdk/js/zenos-memory-client.mjs';
 
-const [cmd, ...args] = process.argv.slice(2);
-const baseUrl = (process.env.ZENOS_MEMORY_URL || 'https://zenos-memory.vercel.app').replace(/\/$/, '');
-const secret = process.env.ETLA_MASTER_SECRET || process.env.ZENOS_MEMORY_SECRET || '';
-
-function sign(method, path) {
-  const ts = Date.now();
-  const payload = `${ts}:${method.toUpperCase()}:${path}`;
-  const sig = crypto.createHmac('sha256', secret).update(payload).digest('hex');
-  return { 'x-etla-timestamp': String(ts), 'x-etla-signature': sig, 'content-type': 'application/json' };
-}
-
-async function request(method, path, body) {
-  if (!secret) throw new Error('Set ETLA_MASTER_SECRET or ZENOS_MEMORY_SECRET');
-  const res = await fetch(baseUrl + path, { method, headers: sign(method, path), body: body ? JSON.stringify(body) : undefined });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`${res.status} ${text}`);
-  return text ? JSON.parse(text) : {};
-}
+const [command, ...args] = process.argv.slice(2);
 
 function usage() {
-  console.log(`Usage:
-  zenos-memory-cli remember <text> [namespace]
-  zenos-memory-cli recall <query> [namespace]
-  zenos-memory-cli compact <json-messages-file> [namespace]
-  zenos-memory-cli ingest <filename> <text> [namespace]
+  process.stdout.write(`Zenos Memory CLI 2.0
 
-Env:
+Usage:
+  npm run cli -- remember <text> [namespace]
+  npm run cli -- recall <query> [namespace]
+  npm run cli -- compact <messages.json> [namespace]
+  npm run cli -- stats [namespace]
+  npm run cli -- health [namespace]
+  npm run cli -- backup [namespace]
+  npm run cli -- restore <snapshot.json> [merge|replace] [namespace]
+
+Environment:
   ZENOS_MEMORY_URL=https://zenos-memory.vercel.app
-  ETLA_MASTER_SECRET=<secret>`);
+  ETLA_MASTER_SECRET=<shared-secret>
+  ZENOS_MEMORY_NAMESPACE=zenos
+`);
 }
 
-try {
-  if (!cmd || cmd === 'help') {
+async function main() {
+  if (!command || command === 'help' || command === '--help') {
     usage();
-  } else if (cmd === 'remember') {
-    const [content, namespace = 'zenos'] = args;
-    console.log(JSON.stringify(await request('POST', '/api/memory/remember', { content, namespace, type: 'fact' }), null, 2));
-  } else if (cmd === 'recall') {
-    const [query, namespace = 'zenos'] = args;
-    console.log(JSON.stringify(await request('POST', '/api/memory/recall', { query, namespace, limit: 10 }), null, 2));
-  } else if (cmd === 'compact') {
-    const [file, namespace = 'zenos'] = args;
-    const fs = await import('node:fs/promises');
-    const messages = JSON.parse(await fs.readFile(file, 'utf8'));
-    console.log(JSON.stringify(await request('POST', '/api/memory/compact', { messages, namespace, reason: 'cli' }), null, 2));
-  } else if (cmd === 'ingest') {
-    const [filename, content, namespace = 'zenos'] = args;
-    console.log(JSON.stringify(await request('POST', '/api/memory/upload', { filename, content, namespace }), null, 2));
-  } else {
-    usage();
-    process.exitCode = 1;
+    return;
   }
-} catch (err) {
-  console.error(err instanceof Error ? err.message : err);
-  process.exitCode = 1;
+  const client = new ZenosMemoryClient();
+  let result;
+  switch (command) {
+    case 'remember': {
+      const [content, namespace] = args;
+      if (!content) throw new Error('remember requires text');
+      result = await client.remember(content, { namespace, idempotencyKey: `cli-${Date.now()}` });
+      break;
+    }
+    case 'recall': {
+      const [query, namespace] = args;
+      if (!query) throw new Error('recall requires a query');
+      result = await client.recall(query, { namespace });
+      break;
+    }
+    case 'compact': {
+      const [filename, namespace] = args;
+      if (!filename) throw new Error('compact requires a JSON messages file');
+      const messages = JSON.parse(await readFile(filename, 'utf8'));
+      result = await client.compact(messages, { namespace, reason: 'cli', idempotencyKey: `cli-compact-${Date.now()}` });
+      break;
+    }
+    case 'stats':
+      result = await client.stats({ namespace: args[0] });
+      break;
+    case 'health':
+      result = await client.health({ namespace: args[0] });
+      break;
+    case 'backup':
+      result = await client.backup({ namespace: args[0] });
+      break;
+    case 'restore': {
+      const [filename, mode = 'merge', namespace] = args;
+      if (!filename) throw new Error('restore requires a snapshot JSON file');
+      if (!['merge', 'replace'].includes(mode)) throw new Error('restore mode must be merge or replace');
+      const snapshot = JSON.parse(await readFile(filename, 'utf8'));
+      result = await client.restore(snapshot, { mode, namespace });
+      break;
+    }
+    default:
+      usage();
+      process.exitCode = 2;
+      return;
+  }
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
+
+void main().catch(error => {
+  const requestId = error?.requestId ? ` request_id=${error.requestId}` : '';
+  process.stderr.write(`Zenos CLI error: ${error instanceof Error ? error.message : String(error)}${requestId}\n`);
+  process.exitCode = 1;
+});

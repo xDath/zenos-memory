@@ -1,153 +1,59 @@
-# Credentials and Secrets Management
+# Zenos Memory Credential Configuration
 
-Do not commit production secrets to Git.
+Zenos Memory reads service credentials from private deployment configuration. It does not store credential values as memories.
 
-This repository is safe to make public only when all real secrets stay in Vercel Environment Variables or local secret files outside the repo.
+## Cloud deployment settings
 
-## Credential Types
+Configure these names in the Vercel project:
 
-### 1. Vercel Deploy Token
+- `ETLA_MASTER_SECRET`
+- `GOOGLE_OAUTH_CLIENT_ID`
+- `GOOGLE_OAUTH_CLIENT_SECRET`
+- `GOOGLE_OAUTH_REFRESH_TOKEN`
+- `GOOGLE_DRIVE_FOLDER_NAME` or `ZENOS_MEMORY_DRIVE_FOLDER_ID`
+- `CRON_SECRET`
 
-Purpose: deploy from local machine to Vercel.
+Cloud architecture settings:
 
-Location:
+- `ZENOS_MEMORY_STORAGE_MODE=drive-events`
+- `ZENOS_MEMORY_DEFAULT_NAMESPACE=zenos`
+- `ZENOS_MEMORY_IMPORT_LEGACY_ON_START=true`
+- `ZENOS_MEMORY_CLOUD_REFRESH_MS=1000`
+- `ZENOS_MEMORY_WRITE_LEASE_MS=25000`
+- `ZENOS_MEMORY_WRITE_WAIT_MS=15000`
 
-```text
-/root/.zenos-secrets/vercel-token.txt
-```
+Optional model-provider settings are listed in `.env.example`.
 
-This token is not required at runtime and must not be committed.
+## Hermes client
 
-### 2. Google Drive OAuth
-
-Purpose: access user-owned Google Drive storage.
-
-Environment variables:
-
-```text
-GOOGLE_OAUTH_CLIENT_ID
-GOOGLE_OAUTH_CLIENT_SECRET
-GOOGLE_OAUTH_REFRESH_TOKEN
-ZENOS_MEMORY_DRIVE_FOLDER_ID
-ZENOS_MEMORY_DRIVE_STRUCTURED=true
-```
-
-Local refresh token helper location:
+The private Hermes profile points to:
 
 ```text
-/root/.zenos-secrets/google-oauth-refresh-token.txt
+https://zenos-memory.vercel.app
 ```
 
-Generate a refresh token:
+The provider signs a token-exchange request locally. The signing secret itself is not sent in the request.
 
-```bash
-GOOGLE_OAUTH_CLIENT_ID=... GOOGLE_OAUTH_CLIENT_SECRET=... node scripts/get-google-oauth-token.mjs
-```
+## Secret references
 
-### 3. LLM Enhancer
+Memory may contain references to a separate secret manager using these URI families:
 
-Purpose: structured compaction, extraction, and reasoning.
+- `vault://`
+- `secret://`
+- `op://`
 
-Environment variables:
+Memory must not contain actual passwords, API keys, session cookies, authorization headers, private keys, or access tokens.
 
-```text
-MEMORY_LLM_BASE_URL=https://router.example.com/v1
-MEMORY_LLM_API_KEY=<router-api-key>
-MEMORY_LLM_MODEL=<provider/model>
-MEMORY_LLM_FALLBACK_MODEL=<provider/model>
-MEMORY_EMBEDDING_MODEL=<embedding-model>
-```
+Legacy secret records are converted into archived references during migration. Their original values are not copied into the Drive event store.
 
-Never hardcode the API key.
+## Rotation
 
-### 4. Etla Signing Secret
+When rotating the signing secret or Google OAuth configuration:
 
-Purpose: sign requests from Hermes/Zenos to protected Zenos Memory APIs.
+1. update the private Vercel environment value;
+2. update the Hermes profile when relevant;
+3. redeploy Vercel;
+4. restart Hermes Gateway;
+5. verify token exchange, readiness, and recall.
 
-Environment variable:
-
-```text
-ETLA_MASTER_SECRET=<strong-secret>
-```
-
-Hermes provider config may also contain this value locally:
-
-```text
-~/.hermes/profiles/zenos/zenos-memory.json
-```
-
-Example shape only:
-
-```json
-{
-  "base_url": "https://zenos-memory.vercel.app",
-  "secret": "<ETLA_MASTER_SECRET>",
-  "namespace": "zenos"
-}
-```
-
-### 5. Zenos Memory API Key
-
-Purpose: legacy/internal API key path.
-
-Environment variable:
-
-```text
-ZENOS_MEMORY_API_KEY=<strong-secret>
-```
-
-### 6. Legacy Service Account
-
-The old service account fallback should not be the primary production path.
-
-If retained locally, keep it outside the repo:
-
-```text
-/root/.zenos-secrets/zenos-memory-sa.json
-```
-
-## Setting Vercel Environment Variables
-
-```bash
-npx vercel env add ETLA_MASTER_SECRET production
-npx vercel env add ZENOS_MEMORY_API_KEY production
-
-npx vercel env add GOOGLE_OAUTH_CLIENT_ID production
-npx vercel env add GOOGLE_OAUTH_CLIENT_SECRET production
-cat /root/.zenos-secrets/google-oauth-refresh-token.txt | npx vercel env add GOOGLE_OAUTH_REFRESH_TOKEN production
-npx vercel env add ZENOS_MEMORY_DRIVE_FOLDER_ID production
-npx vercel env add ZENOS_MEMORY_DRIVE_STRUCTURED production
-
-npx vercel env add MEMORY_LLM_BASE_URL production
-npx vercel env add MEMORY_LLM_API_KEY production
-npx vercel env add MEMORY_LLM_MODEL production
-npx vercel env add MEMORY_LLM_FALLBACK_MODEL production
-npx vercel env add MEMORY_EMBEDDING_MODEL production
-
-npx vercel env add CRON_SECRET production
-```
-
-## Pre-Public Checklist
-
-Run this before making the repository public:
-
-```bash
-git grep -nE 'sk-|vcp_|ghp_|GOCSPX-|private_key|BEGIN PRIVATE KEY|shirinka' || true
-```
-
-Expected result: no real secrets. Placeholder examples are acceptable only if clearly redacted.
-
-## Best Practices
-
-- Keep all local secret files under `/root/.zenos-secrets/` with `chmod 600`.
-- Never print secrets in logs or API responses.
-- Prefer OAuth refresh tokens over service accounts for personal Google Drive.
-- Rotate secrets if they are accidentally exposed.
-- Keep `.env*` ignored.
-
-## Troubleshooting
-
-- LLM returns 401: check `MEMORY_LLM_API_KEY`.
-- Drive returns 403/404: check OAuth token and Drive folder access.
-- Signature invalid: check `ETLA_MASTER_SECRET` in both Vercel and Hermes.
-- Cron unauthorized: check `CRON_SECRET`.
+Never commit private environment files or profile configuration to Git.

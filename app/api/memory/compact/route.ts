@@ -1,107 +1,112 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
-import { CompactRequestSchema, normalizeContent, redactSensitiveText } from '../../../lib/compaction';
-import { compactWithLLM, hasMemoryLLM } from '../../../lib/memory-llm';
+import { NextRequest } from 'next/server';
+import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
+import { buildAdvancedCompactSnapshot, CompactRequestSchema, normalizeContent } from '../../../lib/compaction';
+import { errorResponse, requestId } from '../../../lib/errors';
 import { getMemoryEngine } from '../../../lib/memory-engine';
+import { compactWithLLM, hasMemoryLLM } from '../../../lib/memory-llm';
+import { redactSensitiveText, sanitizeUnknown } from '../../../lib/secrets';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+function structuredContent(blocks: Record<string, unknown>): string {
+  const sections: string[] = [];
+  const scalar = (label: string, key: string) => {
+    const value = blocks[key];
+    if (typeof value === 'string' && value.trim()) sections.push(`## ${label}\n${value.trim()}`);
+  };
+  const list = (label: string, key: string) => {
+    const value = blocks[key];
+    if (Array.isArray(value) && value.length) {
+      sections.push(`## ${label}\n${value.map(item => `- ${String(item)}`).join('\n')}`);
+    }
+  };
+  scalar('Current Goal', 'current_goal');
+  scalar('Active State', 'active_state');
+  list('Key Decisions', 'key_decisions');
+  list('Important Facts', 'important_facts');
+  list('Completed Work', 'completed_work');
+  list('Pending Work', 'pending_work');
+  list('Blockers', 'blockers');
+  list('Files and Artifacts', 'files_artifacts');
+  scalar('Recovery Instructions', 'recovery_instructions');
+  return redactSensitiveText(sections.join('\n\n')).slice(0, 64_000);
+}
 
 export async function POST(request: NextRequest) {
   if (!validateApiKey(request)) return unauthorizedResponse();
-
+  const id = requestId(request);
   try {
-    const body = await request.json();
-    const req = CompactRequestSchema.parse(body);
-
-    if (!hasMemoryLLM()) {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'LLM enhancer not configured. Set MEMORY_LLM_* envs for advanced compact.' 
-      }, { status: 500 });
-    }
-
-    const conversationText = req.messages
-      .map((m) => `${m.role}: ${normalizeContent(m.content)}`)
+    const parsed = CompactRequestSchema.parse(await request.json());
+    const namespace = parsed.namespace || 'zenos';
+    const conversationText = parsed.messages
+      .map(message => `${message.role}: ${normalizeContent(message.content)}`)
       .join('\n\n')
-      .slice(0, 24000);
+      .slice(0, parsed.max_chars || 24_000);
 
-    const llmResult = await compactWithLLM(conversationText);
+    let content: string;
+    let blocks: Record<string, unknown>;
+    let model: string | null = null;
+    let strategy: 'llm-structured-v1' | 'deterministic-structured-v3';
 
-    if (!llmResult.ok || !llmResult.parsed) {
-      return NextResponse.json({ 
-        success: false, 
-        error: llmResult.error || 'LLM compact failed' 
-      }, { status: 500 });
+    if (hasMemoryLLM()) {
+      const result = await compactWithLLM(conversationText);
+      if (result.ok && result.parsed) {
+        blocks = sanitizeUnknown(result.parsed) as Record<string, unknown>;
+        content = structuredContent(blocks);
+        model = result.model || null;
+        strategy = 'llm-structured-v1';
+      } else {
+        const fallback = buildAdvancedCompactSnapshot(parsed);
+        blocks = sanitizeUnknown(fallback.blocks) as Record<string, unknown>;
+        content = fallback.content;
+        strategy = 'deterministic-structured-v3';
+      }
+    } else {
+      const fallback = buildAdvancedCompactSnapshot(parsed);
+      blocks = sanitizeUnknown(fallback.blocks) as Record<string, unknown>;
+      content = fallback.content;
+      strategy = 'deterministic-structured-v3';
     }
 
-    const parsed = {
-      ...llmResult.parsed,
-      credentials: (llmResult.parsed.credentials || []).map((cred: Record<string, unknown>) => ({
-        ...cred,
-        key: cred.key ? redactSensitiveText(String(cred.key)) : cred.key,
-      })),
-    };
+    if (!content.trim()) throw new Error('Compaction produced no durable content');
     const engine = getMemoryEngine();
-    const namespace = req.namespace || 'zenos';
-
-    // Store the main structured handoff as insight
-    const compactResult = {
-      content: redactSensitiveText(llmResult.content),
-      type: 'insight' as const,
-      metadata: {
-        source: 'zenos-memory-advanced-llm-compact',
-        confidence: 0.92,
-        importance: 10,
-        tags: ['advanced-compact', 'structured-handoff', 'llm'],
-        provenance: {
-          session_id: req.session_id,
-          conversation_id: req.conversation_id,
-          model: llmResult.model,
-          created_by: 'zenos-memory',
-          message_count: req.messages.length,
-          approx_tokens: req.approx_tokens,
-          reason: req.reason,
-        },
-        blocks: parsed,
-      },
-    };
-
-    await engine.remember({
-      content: compactResult.content,
+    const memory = await engine.remember({
+      content,
       type: 'insight',
       namespace,
-      metadata: compactResult.metadata,
+      metadata: {
+        source: 'zenos-memory-compact',
+        confidence: strategy.startsWith('llm') ? 0.9 : 0.78,
+        importance: 10,
+        tags: ['compact', 'structured-handoff', strategy],
+        provenance: {
+          session_id: parsed.session_id,
+          conversation_id: parsed.conversation_id,
+          created_by: 'zenos-memory',
+        },
+        message_count: parsed.messages.length,
+        approx_tokens: parsed.approx_tokens,
+        reason: parsed.reason,
+        compact_strategy: strategy,
+        blocks,
+      },
+      idempotency_key: request.headers.get('idempotency-key') || undefined,
     });
 
-    // Automatically store any extracted credentials as separate 'credential' memories
-    if (parsed.credentials && Array.isArray(parsed.credentials)) {
-      for (const cred of parsed.credentials) {
-        if (cred.service && cred.key) {
-          await engine.remember({
-            content: cred.key,
-            type: 'credential',
-            namespace,
-            metadata: {
-              credential_for: cred.service,
-              description: cred.description || '',
-              is_secret: true,
-              source: 'llm-extracted-from-compact',
-              importance: 9,
-              confidence: 0.95,
-            },
-          });
-        }
-      }
-    }
-
-    return NextResponse.json({ 
-      success: true, 
-      compact: compactResult,
-      used_llm: true,
-      model: llmResult.model,
-      structured_blocks: parsed,
-      credentials_stored: parsed.credentials ? parsed.credentials.length : 0
+    return Response.json({
+      success: true,
+      compact: memory,
+      structured_blocks: blocks,
+      strategy,
+      model,
+      credentials_stored: 0,
+      secret_policy: 'raw-secrets-rejected',
+      request_id: id,
+    }, {
+      headers: { 'cache-control': 'no-store', 'x-request-id': id },
     });
-
-  } catch (error: any) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  } catch (error) {
+    return errorResponse(error, id);
   }
 }

@@ -1,11 +1,14 @@
-import { NextResponse } from 'next/server';
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function GET() {
-  return NextResponse.json({
+  return Response.json({
     status: 'ok',
     service: 'zenos-memory',
-    version: '0.1.0',
-    phase: 'core-engine',
-    timestamp: new Date().toISOString()
+    version: '2.0.0',
+    role: 'liveness',
+    timestamp: new Date().toISOString(),
+  }, {
+    headers: { 'cache-control': 'no-store' },
   });
 }

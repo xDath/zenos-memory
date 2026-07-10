@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { Memory } from './schema';
+import { redactSensitiveText as redactSecrets } from './secrets';
 
 export const CompactMessageSchema = z.object({
   role: z.string().default('unknown'),
@@ -30,19 +31,14 @@ export type CompactRequest = z.infer<typeof CompactRequestSchema>;
 export type BootstrapRequest = z.infer<typeof BootstrapRequestSchema>;
 
 const DEFAULT_BOOTSTRAP_QUERIES = [
-  'context reset zenos memory hermes compression auto-reset primary recovery auto-compact',
-  'current active projects tuan zenos hermes memory preferences',
-  'batang job hunt pearl mining llm.etla.me dashboard crypto ops captcha solver active state',
-  'gass langsung no questions execution style keep hermes base zenos memory',
+  'current goals active projects decisions blockers next steps',
+  'user preferences communication style durable instructions',
+  'recent completed work files services deployments active state',
+  'context recovery compact handoff unresolved questions',
 ];
 
 export function redactSensitiveText(text: string): string {
-  return text
-    .replace(/sk-(?=[A-Za-z0-9._-]*\d)[A-Za-z0-9._-]{8,}/g, '[REDACTED_OPENAI_KEY]')
-    .replace(/vcp_[A-Za-z0-9_-]{8,}/g, '[REDACTED_VERCEL_TOKEN]')
-    .replace(/ghp_[A-Za-z0-9_]{8,}/g, '[REDACTED_GITHUB_TOKEN]')
-    .replace(/AIza[0-9A-Za-z_-]{20,}/g, '[REDACTED_GOOGLE_KEY]')
-    .replace(/AKIA[0-9A-Z]{12,}/g, '[REDACTED_AWS_KEY]');
+  return redactSecrets(text);
 }
 
 export function normalizeContent(content: unknown): string {
@@ -140,7 +136,7 @@ export function buildCompactSnapshot(req: CompactRequest) {
 export interface AdvancedCompactResult {
   content: string;
   type: 'insight' | 'project' | 'event';
-  metadata: any;
+  metadata: Record<string, unknown>;
   blocks: {
     facts: string[];
     tasks: string[];
@@ -156,12 +152,12 @@ export interface AdvancedCompactResult {
 }
 
 const TOPIC_PATTERNS: Array<[string, RegExp]> = [
-  ['batang-job-hunt', /\b(batang|job|loker|lamaran|interview|cv|kerja)\b/i],
-  ['pearl-mining', /\b(pearl|mining|prl|wallet|claim|airdrop)\b/i],
-  ['llm-dashboard', /\b(llm\.etla|valorant|combo|checker|dashboard)\b/i],
-  ['hermes-memory', /\b(hermes|zenos memory|compact|compression|context|reset|mem0|codex)\b/i],
-  ['captcha-solver', /\b(captcha|solver|turnstile|cloudflare)\b/i],
-  ['deployment', /\b(vercel|github|deploy|production|env|service)\b/i],
+  ['career', /\b(job|career|application|interview|cv|resume|work|kerja|lamaran)\b/i],
+  ['software-project', /\b(project|repo|code|build|bug|feature|architecture|database|api)\b/i],
+  ['agent-memory', /\b(agent|memory|compact|compression|context|recovery|bootstrap|hermes|zenos)\b/i],
+  ['operations', /\b(deploy|production|server|vps|service|incident|monitor|backup|restore)\b/i],
+  ['security', /\b(auth|security|permission|credential|secret|token|vulnerability)\b/i],
+  ['design-content', /\b(design|image|video|presentation|document|caption|thumbnail)\b/i],
 ];
 
 function uniquePush(list: string[], value: string, max: number, clip = 220) {
@@ -196,8 +192,6 @@ function extractBlocks(messages: CompactRequest['messages'], maxPerBlock = 8) {
     const role = String(msg.role || 'unknown');
     const text = normalizeContent(msg.content);
     if (!text || text.length < 10) continue;
-    const t = text.toLowerCase();
-
     if (role === 'user') uniquePush(timeline, `User: ${text}`, 10, 180);
     if (role === 'assistant' && /(done|implemented|fixed|created|updated|deployed|tested|sukses|selesai)/i.test(text)) {
       uniquePush(timeline, `Assistant: ${text}`, 10, 180);
@@ -269,7 +263,7 @@ function chunkMessages(messages: CompactRequest['messages'], size = 12) {
   return chunks;
 }
 
-function summarizeChunk(chunk: { start: number; end: number; messages: CompactRequest['messages'] }, topicHint = 'general') {
+function summarizeChunk(chunk: { start: number; end: number; messages: CompactRequest['messages'] }) {
   const lines: string[] = [];
   for (const msg of chunk.messages) {
     const role = String(msg.role || 'unknown');
@@ -285,7 +279,7 @@ function buildCompactionDag(messages: CompactRequest['messages']) {
   const topics = inferTopics(messages);
   const chunks = chunkMessages(messages.slice(-180), 12);
   const leafNodes = chunks.map((chunk, idx) => {
-    const summary = summarizeChunk(chunk, topics[0] || 'general');
+    const summary = summarizeChunk(chunk);
     return {
       id: `leaf-${idx + 1}`,
       level: 0,

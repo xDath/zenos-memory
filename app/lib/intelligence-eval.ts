@@ -1,204 +1,173 @@
-import { buildDagCompactSnapshot, renderBootstrapBlock, CompactRequest } from './compaction';
-import { deterministicEmbedding, cosineSimilarity } from './advanced-memory';
-import { callMemoryLLM, hasMemoryLLM } from './memory-llm';
-import { Memory } from './schema';
+import { cosineSimilarity, deterministicEmbedding } from './advanced-memory';
+import { buildDagCompactSnapshot, CompactRequest, renderBootstrapBlock } from './compaction';
+import { rankHybrid } from './hybrid-retrieval';
+import { Memory, MemorySchema } from './schema';
+import { scanSensitiveText } from './secrets';
 
-function fixtureMemory(id: string, content: string, importance: number, tags: string[] = []): Memory {
-  const now = new Date().toISOString();
-  return {
+interface EvalCase {
+  name: string;
+  passed: boolean;
+  details: Record<string, unknown>;
+}
+
+function fixtureMemory(
+  id: string,
+  content: string,
+  options: {
+    type?: Memory['type'];
+    importance?: number;
+    tags?: string[];
+    entities?: string[];
+    status?: Memory['metadata']['status'];
+    supersedes?: string[];
+    createdAt?: string;
+  } = {},
+): Memory {
+  const timestamp = options.createdAt || new Date().toISOString();
+  return MemorySchema.parse({
     id,
-    type: 'insight',
+    type: options.type || 'insight',
     content,
     namespace: 'eval',
     metadata: {
       confidence: 0.9,
-      tags,
+      tags: options.tags || [],
       version: 1,
-      importance,
+      status: options.status || 'active',
+      importance: options.importance || 7,
       related_ids: [],
-      entities: [],
+      entities: options.entities || [],
       contradictions: [],
-      supersedes_ids: [],
+      supersedes_ids: options.supersedes || [],
       access_count: 0,
       is_secret: false,
       redacted: false,
+      source: 'eval-fixture',
     },
-    created_at: now,
-    updated_at: now,
-  };
-}
-
-function containsAll(text: string, terms: string[]) {
-  const lower = text.toLowerCase();
-  return terms.every(term => lower.includes(term.toLowerCase()));
-}
-
-function scoreAnswer(answer: string, required: string[], forbidden: string[] = []) {
-  const lower = answer.toLowerCase();
-  const requiredHits = required.filter(term => lower.includes(term.toLowerCase())).length;
-  const forbiddenHits = forbidden.filter(term => lower.includes(term.toLowerCase())).length;
-  return {
-    required_hits: requiredHits,
-    forbidden_hits: forbiddenHits,
-    score: requiredHits / required.length - forbiddenHits * 0.25,
-  };
-}
-
-function simulateLowerTierAnswer(prompt: string) {
-  const lower = prompt.toLowerCase();
-  if (!lower.includes('zenos memory bootstrap')) {
-    return 'We can improve the model by trying a better model, adding prompts, or building a new project.';
-  }
-  return 'Use Zenos Memory as the Agent Context OS. Follow the roadmap source of truth, continue the compact -> bootstrap -> eval loop, preserve pending work, and avoid scope drift before adding new features.';
-}
-
-async function callEvalModel(prompt: string) {
-  if (!hasMemoryLLM()) {
-    return { ok: false, skipped: true, reason: 'MEMORY_LLM_* not configured' };
-  }
-  const result = await callMemoryLLM([
-    { role: 'system', content: 'Answer briefly. If bootstrap context is provided, follow it as source of truth. Return JSON: {"answer":"..."}' },
-    { role: 'user', content: prompt },
-  ]);
-  return {
-    ok: result.ok,
-    skipped: false,
-    model: result.model,
-    answer: typeof result.parsed?.answer === 'string' ? result.parsed.answer : (result.content || ''),
-    error: result.error,
-  };
-}
-
-function buildEvalFixture() {
-  const messages: CompactRequest['messages'] = [
-    { role: 'user', content: 'Tujuan utama kita adalah menaikkan effective intelligence LLM tier bawah di ekosistem Zenos/Hermes.' },
-    { role: 'assistant', content: 'Keputusan: upgrade Zenos Memory sebagai Agent Context OS, bukan bikin project baru.' },
-    { role: 'user', content: 'Roadmap harus jadi source of truth supaya agent tidak scope drift dan tidak kasih saran liar.' },
-    { role: 'assistant', content: 'Next task: troubleshoot auth integration, audit compact/bootstrap, lalu tambah eval reset recovery dan secret redaction.' },
-    { role: 'user', content: 'Pending work: compact -> bootstrap -> eval loop harus terbukti bisa recover setelah session reset.' },
-  ];
-
-  const compact = buildDagCompactSnapshot({
-    messages,
-    namespace: 'eval',
-    reason: 'intelligence-amplification-eval',
-    approx_tokens: 1200,
-    max_chars: 9000,
-    mode: 'dag',
+    created_at: timestamp,
+    updated_at: timestamp,
   });
+}
 
-  const bootstrap = renderBootstrapBlock([
-    fixtureMemory('11111111-1111-4111-8111-111111111111', compact.content, 10, ['dag-compact', 'working-pack']),
-    fixtureMemory('22222222-2222-4222-8222-222222222222', 'Zenos Memory roadmap is the source of truth and anti-scope-drift contract.', 9, ['roadmap']),
-  ], 'eval', 5000);
-
-  const fakeSecret = 'sk-' + 'TESTKEY1234567890';
-  const secretMessages: CompactRequest['messages'] = [
-    { role: 'user', content: `Use fake test secret ${fakeSecret} for validation only.` },
-    { role: 'assistant', content: 'Never expose raw secrets in compact or bootstrap outputs.' },
-  ];
-  const secretCompact = buildDagCompactSnapshot({
-    messages: secretMessages,
-    namespace: 'eval',
-    reason: 'secret-redaction-eval',
-    approx_tokens: 300,
-    max_chars: 4000,
-    mode: 'dag',
-  });
-
-  const noMemoryAnswer = simulateLowerTierAnswer('Lanjut project kemarin. Apa targetnya?');
-  const withMemoryAnswer = simulateLowerTierAnswer(`${bootstrap}\n\nUser asks: Lanjut project kemarin. Apa targetnya?`);
-  const requiredTerms = ['Zenos Memory', 'Agent Context OS', 'roadmap', 'compact', 'bootstrap', 'eval'];
-  const forbiddenTerms = ['new project', 'better model'];
-  const noMemoryScore = scoreAnswer(noMemoryAnswer, requiredTerms, forbiddenTerms);
-  const withMemoryScore = scoreAnswer(withMemoryAnswer, requiredTerms, forbiddenTerms);
-
-  const consumerContract = [
-    'Always inject bootstrap before answering continuation requests.',
-    'Treat roadmap as source of truth and reject scope drift.',
-    'Use compacted working pack for active tasks and recovery.',
-    'Run benchmark/eval after memory lifecycle changes.',
-    'Never expose raw secrets from memory or compact output.',
-  ].join('\n');
-
-  const retrievalQuery = 'what is the active target for lower tier llm intelligence upgrade';
-  const unrelated = 'Steam marketplace listing hold and mobile authenticator troubleshooting.';
-  const relevant = bootstrap;
-  const retrievalSimilarity = cosineSimilarity(deterministicEmbedding(retrievalQuery), deterministicEmbedding(relevant));
-  const unrelatedSimilarity = cosineSimilarity(deterministicEmbedding(retrievalQuery), deterministicEmbedding(unrelated));
-
-  return {
-    compact,
-    bootstrap,
-    fakeSecret,
-    secretCompact,
-    noMemoryAnswer,
-    withMemoryAnswer,
-    noMemoryScore,
-    withMemoryScore,
-    consumerContract,
-    retrievalQuery,
-    retrievalSimilarity,
-    unrelatedSimilarity,
-  };
+function containsAll(text: string, terms: string[]): boolean {
+  const normalized = text.toLowerCase();
+  return terms.every(term => normalized.includes(term.toLowerCase()));
 }
 
 export function runIntelligenceAmplificationEval() {
-  const fx = buildEvalFixture();
+  const messages: CompactRequest['messages'] = [
+    { role: 'user', content: 'The current goal is to harden Zenos Memory for durable production use.' },
+    { role: 'assistant', content: 'Decision: Vercel is the scale-to-zero compute plane and Google Drive append-only events are the canonical personal store.' },
+    { role: 'user', content: 'Pending work includes security tests, migration checks, cold-start recovery, snapshot verification, and production deployment.' },
+    { role: 'assistant', content: 'Completed: raw credential capture was removed, Drive CAS leases were added, and the VPS became a thin client.' },
+  ];
+  const compact = buildDagCompactSnapshot({
+    messages,
+    namespace: 'eval',
+    reason: 'contract-regression',
+    approx_tokens: 350,
+    max_chars: 8000,
+    mode: 'dag',
+  });
+  const compactMemory = fixtureMemory(
+    '11111111-1111-4111-8111-111111111111',
+    compact.content,
+    { importance: 10, tags: ['dag-compact', 'working-pack'], entities: ['Zenos Memory'] },
+  );
+  const policyMemory = fixtureMemory(
+    '22222222-2222-4222-8222-222222222222',
+    'Raw secrets are rejected; only vault references may be stored.',
+    { importance: 10, tags: ['security', 'secret-policy'], entities: ['Zenos Memory'] },
+  );
+  const bootstrap = renderBootstrapBlock([compactMemory, policyMemory], 'eval', 6000);
 
-  const cases = [
+  const fakeSecret = `sk-${'A'.repeat(32)}`;
+  const secretCompact = buildDagCompactSnapshot({
+    messages: [
+      { role: 'user', content: `Do not preserve this test token: ${fakeSecret}` },
+      { role: 'assistant', content: 'The token must be redacted before storage.' },
+    ],
+    namespace: 'eval',
+    reason: 'secret-regression',
+    approx_tokens: 80,
+    max_chars: 3000,
+    mode: 'dag',
+  });
+
+  const oldState = fixtureMemory(
+    '33333333-3333-4333-8333-333333333333',
+    'The primary memory store is one mutable Google Drive JSON file that is rewritten on every request.',
+    { type: 'project', importance: 8, tags: ['storage'], entities: ['Google Drive'], status: 'superseded', createdAt: '2026-01-01T00:00:00.000Z' },
+  );
+  const currentState = fixtureMemory(
+    '44444444-4444-4444-8444-444444444444',
+    'The canonical memory store is an append-only Google Drive event stream; Vercel performs compute and ephemeral SQLite only accelerates warm retrieval.',
+    { type: 'project', importance: 10, tags: ['storage', 'drive-events', 'vercel'], entities: ['Google Drive', 'Vercel'], supersedes: [oldState.id], createdAt: '2026-07-10T00:00:00.000Z' },
+  );
+  const unrelated = fixtureMemory(
+    '55555555-5555-4555-8555-555555555555',
+    'The profile picture uses a smooth pastel anime illustration style.',
+    { importance: 3, tags: ['design'], entities: ['Profile Picture'] },
+  );
+  const ranked = rankHybrid('what is the current durable primary storage architecture', [oldState, currentState, unrelated], 3);
+
+  const relevantSimilarity = cosineSimilarity(
+    deterministicEmbedding('current durable primary storage architecture'),
+    deterministicEmbedding(currentState.content),
+  );
+  const unrelatedSimilarity = cosineSimilarity(
+    deterministicEmbedding('current durable primary storage architecture'),
+    deterministicEmbedding(unrelated.content),
+  );
+
+  const cases: EvalCase[] = [
     {
-      name: 'compact_preserves_north_star',
-      pass: containsAll(fx.compact.content, ['effective intelligence', 'LLM', 'Zenos Memory']),
+      name: 'compact_preserves_goal',
+      passed: containsAll(compact.content, ['Zenos Memory', 'production']),
+      details: { preview: compact.content.slice(0, 240) },
     },
     {
-      name: 'compact_preserves_roadmap_discipline',
-      pass: containsAll(fx.compact.content, ['roadmap', 'source of truth']) || containsAll(fx.compact.content, ['scope drift']),
+      name: 'compact_preserves_decision_and_pending_work',
+      passed: containsAll(compact.content, ['Vercel', 'Google Drive', 'security tests', 'snapshot verification']),
+      details: { block_counts: compact.metadata.block_counts },
     },
     {
-      name: 'compact_preserves_pending_work',
-      pass: containsAll(fx.compact.content, ['compact', 'bootstrap', 'eval']),
+      name: 'bootstrap_is_bounded_and_actionable',
+      passed: bootstrap.length > 0 && bootstrap.length <= 6000 && containsAll(bootstrap, ['Zenos Memory Bootstrap', 'Raw secrets']),
+      details: { characters: bootstrap.length },
     },
     {
-      name: 'bootstrap_is_agent_ready',
-      pass: containsAll(fx.bootstrap, ['Zenos Memory Bootstrap', 'Agent Context OS']) && fx.bootstrap.length <= 5000,
+      name: 'secret_redaction',
+      passed: !secretCompact.content.includes(fakeSecret) && scanSensitiveText(secretCompact.content).detected === false,
+      details: { contains_raw_secret: secretCompact.content.includes(fakeSecret) },
     },
     {
-      name: 'secret_redaction_required',
-      pass: !fx.secretCompact.content.includes(fx.fakeSecret) && fx.secretCompact.content.includes('[REDACTED_OPENAI_KEY]'),
+      name: 'current_state_outweighs_superseded_state',
+      passed: ranked[0]?.memory.id === currentState.id && !ranked.some(result => result.memory.id === oldState.id),
+      details: { ranking: ranked.map(result => ({ id: result.memory.id, score: Number(result.score.toFixed(4)), reason: result.reason })) },
     },
     {
-      name: 'lower_tier_answer_improves_with_bootstrap',
-      pass: fx.withMemoryScore.score > fx.noMemoryScore.score && fx.withMemoryScore.required_hits >= 5 && fx.noMemoryScore.forbidden_hits > 0,
-    },
-    {
-      name: 'consumer_contract_enforces_scope_and_safety',
-      pass: containsAll(fx.consumerContract, ['bootstrap', 'roadmap', 'scope drift', 'benchmark', 'secrets']),
-    },
-    {
-      name: 'retrieval_prefers_relevant_context',
-      pass: fx.retrievalSimilarity > fx.unrelatedSimilarity,
+      name: 'retrieval_separates_relevant_context',
+      passed: relevantSimilarity > unrelatedSimilarity,
+      details: {
+        relevant_similarity: Number(relevantSimilarity.toFixed(4)),
+        unrelated_similarity: Number(unrelatedSimilarity.toFixed(4)),
+      },
     },
   ];
 
-  const passed = cases.filter(c => c.pass).length;
+  const passed = cases.filter(item => item.passed).length;
   return {
     success: passed === cases.length,
-    benchmark: 'zenos-memory-intelligence-amplification-v3',
-    score: passed / cases.length,
+    benchmark: 'zenos-memory-contract-regression-v1',
+    score: Number((passed / cases.length).toFixed(4)),
+    passed,
+    failed: cases.length - passed,
     cases,
-    lower_tier_simulation: {
-      no_memory: { answer: fx.noMemoryAnswer, ...fx.noMemoryScore },
-      with_memory: { answer: fx.withMemoryAnswer, ...fx.withMemoryScore },
+    methodology: {
+      scope: 'deterministic contract regression',
+      claims: 'This validates invariants; it is not a scientific model-intelligence benchmark.',
+      retrieval_provider: 'deterministic hashed embedding baseline plus hybrid lifecycle ranking',
     },
-    retrieval_eval: {
-      query: fx.retrievalQuery,
-      relevant_similarity: Number(fx.retrievalSimilarity.toFixed(4)),
-      unrelated_similarity: Number(fx.unrelatedSimilarity.toFixed(4)),
-      provider: 'deterministic-hashed-embedding-baseline',
-    },
-    consumer_contract: fx.consumerContract,
-    compact_preview: fx.compact.content.slice(0, 800),
-    bootstrap_preview: fx.bootstrap.slice(0, 800),
   };
 }

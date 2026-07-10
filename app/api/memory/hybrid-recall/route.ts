@@ -1,27 +1,28 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { RecallRequestSchema } from '../../../lib/schema';
+import { NextRequest } from 'next/server';
+import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
+import { errorResponse, requestId } from '../../../lib/errors';
+import { enforceRateLimit, jsonResponse } from '../../../lib/http';
 import { getMemoryEngine } from '../../../lib/memory-engine';
-import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
-import { rateLimit } from '../../../lib/rate-limit';
+import { RecallRequestSchema } from '../../../lib/schema';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function POST(request: NextRequest) {
-  const ip = request.headers.get('x-forwarded-for') || 'unknown';
-  if (!rateLimit(ip)) return NextResponse.json({ error: 'Rate limit exceeded' }, { status: 429 });
   if (!validateApiKey(request)) return unauthorizedResponse();
-
+  const id = requestId(request);
   try {
+    enforceRateLimit(request, { bucket: 'hybrid-recall', limit: 180 });
     const parsed = RecallRequestSchema.parse(await request.json());
-    const engine = getMemoryEngine();
-    const results = await engine.recallWithQuality(parsed);
-    return NextResponse.json({
+    const results = await getMemoryEngine().recallWithQuality(parsed);
+    return jsonResponse({
       success: true,
-      mode: 'hybrid-recall-v2',
-      query: parsed.query,
-      count: results.length,
       results,
-    });
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : 'Failed to run hybrid recall';
-    return NextResponse.json({ error: message }, { status: 500 });
+      count: results.length,
+      retrieval: 'sqlite-fts5-hybrid-lifecycle-v1',
+      request_id: id,
+    }, { requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
   }
 }

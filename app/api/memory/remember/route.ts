@@ -1,50 +1,25 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { RememberRequestSchema } from '../../../lib/schema';
+import { NextRequest } from 'next/server';
+import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
+import { errorResponse, requestId } from '../../../lib/errors';
+import { enforceRateLimit, jsonResponse } from '../../../lib/http';
 import { getMemoryEngine } from '../../../lib/memory-engine';
-import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
-import { rateLimit } from '../../../lib/rate-limit';
+import { RememberRequestSchema } from '../../../lib/schema';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function POST(request: NextRequest) {
-  const ip = request.headers.get('x-forwarded-for') || 'unknown';
-  if (!rateLimit(ip)) {
-    return NextResponse.json({ error: 'Rate limit exceeded' }, { status: 429 });
-  }
-  if (!validateApiKey(request)) {
-    return unauthorizedResponse();
-  }
-
+  if (!validateApiKey(request)) return unauthorizedResponse();
+  const id = requestId(request);
   try {
-    const body = await request.json();
-    const parsed = RememberRequestSchema.parse(body);
-
-    const engine = getMemoryEngine();
-    const memory = await engine.remember(parsed);
-
-    return NextResponse.json({
-      success: true,
-      memory,
-      message: 'Memory stored successfully'
-    }, { status: 201 });
-
-  } catch (error: any) {
-    console.error('Remember error:', error);
-    if (error.name === 'ZodError') {
-      return NextResponse.json({ error: 'Validation error', details: error.errors }, { status: 400 });
-    }
-    return NextResponse.json({ error: 'Failed to remember', details: error.message }, { status: 500 });
+    enforceRateLimit(request, { bucket: 'remember', limit: 90 });
+    const parsed = RememberRequestSchema.parse(await request.json());
+    const memory = await getMemoryEngine().remember({
+      ...parsed,
+      idempotency_key: request.headers.get('idempotency-key') || parsed.idempotency_key,
+    });
+    return jsonResponse({ success: true, memory, request_id: id }, { status: 201, requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
   }
-}
-
-export async function GET() {
-  return NextResponse.json({
-    endpoint: '/api/memory/remember',
-    method: 'POST',
-    description: 'Store a new memory',
-    example: {
-      content: "User prefers dark mode UI",
-      type: "preference",
-      namespace: "zenos",
-      metadata: { tags: ["ui", "preference"], confidence: 0.9 }
-    }
-  });
 }

@@ -37,7 +37,7 @@ export function buildMaintenanceReport(memories: Memory[]) {
   const stale = memories.filter(m => now - new Date(m.updated_at).getTime() > 1000 * 60 * 60 * 24 * 30);
   const lowConfidence = memories.filter(m => (m.metadata.confidence || 0) < 0.55);
   const compactions = memories.filter(m => m.type === 'insight' && (m.metadata.tags || []).some(t => t.includes('compact')));
-  const credentials = memories.filter(m => m.type === 'credential');
+  const secretReferences = memories.filter(m => m.type === 'secret_reference');
   const withProvenance = memories.filter(m => !!m.metadata.provenance || !!m.metadata.source);
   const relationshipIndexes = memories.filter(m => m.type === 'relationship' && m.metadata.tags.includes('relationship-index'));
   const knowledgeChunks = memories.filter(m => m.type === 'file' && m.metadata.tags.includes('knowledge-chunk'));
@@ -51,7 +51,7 @@ export function buildMaintenanceReport(memories: Memory[]) {
       stale: stale.length,
       low_confidence: lowConfidence.length,
       compactions: compactions.length,
-      credentials: credentials.length,
+      secret_references: secretReferences.length,
       provenance_coverage: withProvenance.length,
       knowledge_chunks: knowledgeChunks.length,
       relationship_indexes: relationshipIndexes.length,
@@ -70,7 +70,9 @@ export function buildMaintenanceReport(memories: Memory[]) {
       graph.stats.edge_count > memories.length ? 'Temporal graph density is healthy' : 'Graph needs more relationship extraction',
       withProvenance.length >= memories.length * 0.7 ? 'Provenance coverage is healthy' : 'Add provenance/source fields to more memories',
       relationshipIndexes.length ? 'Knowledge graph ingestion is active' : 'Upload docs/repos to build relationship indexes',
-      credentials.length ? 'Credential memory is active' : 'No credential memories stored yet',
+      secretReferences.length
+        ? `${secretReferences.length} external vault references are registered`
+        : 'No external vault references are registered',
     ],
   };
 }

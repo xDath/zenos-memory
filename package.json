@@ -1,14 +1,31 @@
 {
   "name": "zenos-memory",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "private": true,
+  "description": "A serverless, user-owned context continuity service powered by Vercel compute and Google Drive events.",
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "scripts": {
-    "dev": "next dev -p 3090",
-    "build": "next build",
-    "start": "next start -p 3090",
-    "lint": "eslint",
+    "dev": "next dev -p 3091",
+    "build": "next build --webpack --experimental-build-mode compile && next build --webpack --experimental-build-mode generate && node scripts/prepare-standalone.mjs",
+    "start": "node scripts/load-env-and-start.mjs",
+    "lint": "eslint --max-warnings=0",
+    "typecheck": "tsc --noEmit --pretty false",
+    "test": "tsx --test tests/*.test.ts",
+    "test:smoke": "tsx test-memory.ts",
+    "check": "npm run typecheck && npm run lint && npm test && npm run test:smoke && npm run build",
     "cli": "node scripts/zenos-memory-cli.mjs",
-    "smoke:prod": "node scripts/smoke-production.mjs"
+    "smoke:prod": "node scripts/smoke-production.mjs",
+    "smoke:cloud": "tsx scripts/smoke-cloud-drive.mts",
+    "maintenance": "node scripts/run-maintenance.mjs",
+    "diagnose:auth": "node scripts/check-auth-scopes.mjs",
+    "diagnose:drive": "tsx scripts/inspect-drive-layout.mjs",
+    "migrate:drive-events": "tsx scripts/migrate-drive-events.mts",
+    "migrate:legacy-vercel": "tsx scripts/migrate-legacy-vercel.mts"
+  },
+  "overrides": {
+    "postcss": "8.5.10"
   },
   "dependencies": {
     "googleapis": "^173.0.0",

@@ -1,51 +1,42 @@
-import { LocalFileMemoryStore } from './app/lib/drive';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { MemoryEngine } from './app/lib/memory-engine';
-import { v4 as uuidv4 } from 'uuid';
+import { SqliteMemoryStore } from './app/lib/sqlite-store';
 
-async function test() {
-  console.log('=== Zenos Memory Local Test ===');
+async function main() {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'zenos-memory-smoke-'));
+  const store = new SqliteMemoryStore(path.join(directory, 'memory.sqlite'));
+  const engine = new MemoryEngine({ store, driveBackup: null });
+  try {
+    const preference = await engine.remember({
+      content: 'The user prefers direct implementation with a concise final report.',
+      type: 'preference',
+      namespace: 'smoke',
+      metadata: { tags: ['style'], confidence: 0.95, importance: 9 },
+    });
+    await engine.remember({
+      content: 'Zenos Memory uses transactional SQLite and immutable Google Drive backups.',
+      type: 'project',
+      namespace: 'smoke',
+      metadata: { tags: ['architecture'], confidence: 0.95, importance: 10 },
+    });
 
-  // Force local
-  process.env.USE_LOCAL_STORE = 'true';
-  process.env.LOCAL_MEMORY_DIR = '/tmp/zenos-memory-test';
-
-  const engine = new MemoryEngine();
-
-  // Test remember
-  const mem1 = await engine.remember({
-    content: "Tuan prefers gass langsung style, no unnecessary questions",
-    type: "preference",
-    namespace: "zenos",
-    metadata: { tags: ["style", "execution"], confidence: 0.95, importance: 9 }
-  });
-  console.log('Remembered 1:', mem1.id);
-
-  const mem2 = await engine.remember({
-    content: "User is building custom memory system using Google Drive + Vercel",
-    type: "project",
-    namespace: "zenos",
-    metadata: { tags: ["project", "memory"], confidence: 0.9 }
-  });
-  console.log('Remembered 2:', mem2.id);
-
-  // Test recall
-  const results = await engine.recall({
-    query: "gass langsung style",
-    namespace: "zenos",
-    limit: 5
-  });
-  console.log('Recall results:', results.length);
-  console.log('Top result content:', results[0]?.content);
-
-  // Stats
-  const stats = await engine.getStats("zenos");
-  console.log('Stats:', stats);
-
-  // Forget one
-  const forgot = await engine.forget(mem2.id, "zenos");
-  console.log('Forgot:', forgot);
-
-  console.log('=== Test PASSED ===');
+    const recalled = await engine.recall({ query: 'preferred communication style', namespace: 'smoke', limit: 5 });
+    assert.equal(recalled[0]?.id, preference.id);
+    assert.equal((await engine.getStats('smoke')).total, 2);
+    assert.equal(await engine.forget(preference.id, 'smoke', preference.metadata.version), true);
+    assert.equal((await engine.list('smoke', 10)).some(memory => memory.id === preference.id), false);
+    assert.equal((await engine.readiness()).storage.ok, true);
+    process.stdout.write('Zenos Memory smoke test passed\n');
+  } finally {
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
-test().catch(console.error);
+void main().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});

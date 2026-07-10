@@ -1,37 +1,31 @@
 # Zenos Memory SDK
 
-Zenos Memory includes lightweight JavaScript and Python SDK clients for learning how an agent can call a cloud-owned memory API with HMAC authentication.
+Both SDKs default to the production cloud endpoint:
 
-> This SDK is intentionally small and readable. It is useful for experiments, agent installers, and reference implementations.
-
-## Environment
-
-```bash
-export ZENOS_MEMORY_URL="https://zenos-memory.vercel.app"
-export ETLA_MASTER_SECRET="<ETLA_MASTER_SECRET>"
+```text
+https://zenos-memory.vercel.app
 ```
+
+Set `ETLA_MASTER_SECRET` or pass a private signing secret to the client. The secret is used locally for HMAC v2 token exchange and is never sent directly.
 
 ## JavaScript
 
 ```js
-import { ZenosMemoryClient } from '../sdk/js/zenos-memory-client.mjs';
+import { ZenosMemoryClient } from './sdk/js/zenos-memory-client.mjs';
 
-const memory = new ZenosMemoryClient();
-await memory.remember('The project uses Google Drive as the memory data layer.');
-const recall = await memory.recall('memory data layer');
-console.log(recall.results?.[0]);
-```
+const memory = new ZenosMemoryClient({ namespace: 'zenos' });
 
-Available methods:
+const stored = await memory.remember(
+  'Vercel performs compute and Google Drive owns the canonical event history.',
+  {
+    type: 'project',
+    idempotencyKey: 'architecture-decision-2026-07-10',
+    metadata: { tags: ['architecture'], importance: 10 },
+  },
+);
 
-```text
-remember(content, options)
-recall(query, options)
-compact(messages, options)
-ingest(filename, content, options)
-timeline(options)
-mutationPlan(content, options)
-benchmark(options)
+const recalled = await memory.recall('current cloud memory architecture', { limit: 5 });
+console.log(recalled.results);
 ```
 
 ## Python
@@ -39,32 +33,47 @@ benchmark(options)
 ```python
 from sdk.python.zenos_memory_client import ZenosMemoryClient
 
-memory = ZenosMemoryClient()
-memory.remember('The project uses Google Drive as the memory data layer.')
-recall = memory.recall('memory data layer')
-print(recall['results'][0])
+memory = ZenosMemoryClient(namespace='zenos')
+
+memory.remember(
+    'Google Drive append-only events are canonical.',
+    type='project',
+    idempotency_key='drive-event-decision',
+)
+
+print(memory.recall('canonical storage', limit=5))
 ```
 
-## HMAC model
+## Authentication
 
-Each request signs:
+The clients automatically:
+
+1. generate a timestamp and nonce;
+2. hash the token-exchange request body;
+3. sign the canonical HMAC v2 message;
+4. request a short-lived scoped token;
+5. cache the token until shortly before expiry.
+
+Tokens are refreshed automatically after an authorization failure.
+
+## Secret policy
+
+Do not send passwords or tokens as memory content. Store them in a dedicated secret manager and remember only a reference such as:
 
 ```text
-<timestamp_ms>:<HTTP_METHOD>:<path_with_query>
+vault://production/vercel
 ```
 
-Headers:
+## Useful operations
 
-```text
-x-etla-timestamp: <timestamp_ms>
-x-etla-signature: <hmac_sha256_hex>
-content-type: application/json
-```
+The clients support:
 
-## Learning flow
+- remember;
+- recall and hybrid recall;
+- edit and archive;
+- stats and readiness;
+- compact and bootstrap;
+- backup and restore;
+- timeline and graph operations.
 
-1. Deploy the API on Vercel.
-2. Configure Google Drive OAuth storage.
-3. Install the Hermes plugin or call the SDK directly.
-4. Run benchmark and timeline smoke tests.
-5. Inspect public status/dashboard without exposing protected memory content.
+See the client source for the current method signatures.

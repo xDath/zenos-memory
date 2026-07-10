@@ -1,26 +1,22 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
+import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
+import { errorResponse, requestId } from '../../../lib/errors';
+import { jsonResponse, parsePositiveInteger } from '../../../lib/http';
 import { getMemoryEngine } from '../../../lib/memory-engine';
-import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
-  if (!validateApiKey(request)) {
-    return unauthorizedResponse();
-  }
-
+  if (!validateApiKey(request)) return unauthorizedResponse();
+  const id = requestId(request);
   try {
-    const { searchParams } = new URL(request.url);
-    const namespace = searchParams.get('namespace') || undefined;
-    const limit = parseInt(searchParams.get('limit') || '20');
-
-    const engine = getMemoryEngine();
-    const memories = await engine.list(namespace, limit);
-
-    return NextResponse.json({
-      success: true,
-      count: memories.length,
-      memories,
-    });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const url = new URL(request.url);
+    const namespace = url.searchParams.get('namespace') || undefined;
+    const limit = parsePositiveInteger(url.searchParams.get('limit'), 50, 500);
+    const memories = await getMemoryEngine().list(namespace, limit);
+    return jsonResponse({ success: true, memories, count: memories.length, request_id: id }, { requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
   }
 }

@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import threading
 import time
 from typing import Any, Dict, List
@@ -49,11 +50,28 @@ def _load_config() -> dict:
     return cfg
 
 
-def _sign(secret: str, method: str, path: str, ts: int | None = None) -> dict:
-    ts = ts or int(time.time() * 1000)
-    payload = f"{ts}:{method.upper()}:{path}"
-    sig = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    return {"x-etla-timestamp": str(ts), "x-etla-signature": sig}
+def _token_exchange_headers(secret: str, scopes: list[str], client_id: str = "hermes-zenos-memory") -> dict:
+    timestamp = int(time.time() * 1000)
+    nonce = secrets.token_urlsafe(18)
+    body_hash = hashlib.sha256(b"").hexdigest()
+    canonical = "\n".join([
+        "zenos-memory-signature-v2",
+        str(timestamp),
+        nonce,
+        "POST",
+        "/api/auth",
+        body_hash,
+    ])
+    signature = hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+    return {
+        "x-etla-timestamp": str(timestamp),
+        "x-etla-nonce": nonce,
+        "x-etla-content-sha256": body_hash,
+        "x-etla-signature": signature,
+        "x-etla-client-id": client_id,
+        "x-etla-requested-scopes": " ".join(scopes),
+        "Content-Type": "application/json",
+    }
 
 
 class ZenosMemoryProvider(MemoryProvider):
@@ -74,6 +92,8 @@ class ZenosMemoryProvider(MemoryProvider):
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: threading.Thread | None = None
         self._sync_thread: threading.Thread | None = None
+        self._token_cache: dict[str, tuple[str, float]] = {}
+        self._token_lock = threading.Lock()
 
     def is_available(self) -> bool:
         cfg = _load_config()
@@ -114,39 +134,66 @@ class ZenosMemoryProvider(MemoryProvider):
     def system_prompt_block(self) -> str:
         return (
             "# Zenos Memory\n"
-            "Active as the default advanced memory backend, replacing Mem0/Memanto. "
-            "Use zenos_memory_search for recall and zenos_memory_remember for durable facts. "
-            "Features include quality scoring, intelligence reports, agent/file/audit APIs, and Etla-signed access."
+            "Active as the durable context continuity backend. "
+            "Use zenos_memory_search for relevant recall and zenos_memory_remember for durable, non-secret facts. "
+            "Raw credentials are never stored; use an external vault and remember only vault references."
         )
 
-    def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+    def _token(self, scopes: tuple[str, ...] = ("memory:read", "memory:write")) -> str:
         if not self._secret:
             raise RuntimeError("Zenos Memory secret is not configured")
-        data = None
-        headers = _sign(self._secret, method, path)
-        headers["Content-Type"] = "application/json"
-        if body is not None:
-            data = json.dumps(body).encode("utf-8")
-        req = urllib_request.Request(self._base_url + path, data=data, headers=headers, method=method.upper())
+        cache_key = " ".join(sorted(scopes))
+        with self._token_lock:
+            cached = self._token_cache.get(cache_key)
+            if cached and time.time() < cached[1] - 30:
+                return cached[0]
+            headers = _token_exchange_headers(self._secret, list(scopes))
+            req = urllib_request.Request(self._base_url + "/api/auth", headers=headers, method="POST")
+            try:
+                with urllib_request.urlopen(req, timeout=20) as resp:
+                    payload = json.loads(resp.read().decode("utf-8") or "{}")
+            except HTTPError as exc:
+                raise RuntimeError(f"Zenos token exchange failed with HTTP {exc.code}") from exc
+            except URLError as exc:
+                raise RuntimeError("Zenos token exchange is unreachable") from exc
+            token = payload.get("token")
+            if not isinstance(token, str):
+                raise RuntimeError("Zenos token exchange returned no token")
+            expires_in = int(payload.get("expires_in") or 900)
+            self._token_cache[cache_key] = (token, time.time() + expires_in)
+            return token
+
+    def _request(self, method: str, path: str, body: dict | None = None, scopes: tuple[str, ...] | None = None) -> dict:
+        method = method.upper()
+        required = scopes or (("memory:read",) if method in ("GET", "HEAD") else ("memory:read", "memory:write"))
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        headers = {
+            "Authorization": f"Bearer {self._token(required)}",
+            "Accept": "application/json",
+        }
+        if data is not None:
+            headers["Content-Type"] = "application/json"
+        req = urllib_request.Request(self._base_url + path, data=data, headers=headers, method=method)
         try:
             with urllib_request.urlopen(req, timeout=20) as resp:
                 raw = resp.read().decode("utf-8")
                 return json.loads(raw) if raw else {}
-        except HTTPError as e:
-            raw = e.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"HTTP {e.code}: {raw[:500]}")
-        except URLError as e:
-            raise RuntimeError(str(e))
+        except HTTPError as exc:
+            if exc.code == 401:
+                with self._token_lock:
+                    self._token_cache.clear()
+            raise RuntimeError(f"Zenos request failed with HTTP {exc.code}") from exc
+        except URLError as exc:
+            raise RuntimeError("Zenos Memory is unreachable") from exc
 
     def _request_text(self, method: str, path: str, body: dict | None = None) -> str:
-        if not self._secret:
-            raise RuntimeError("Zenos Memory secret is not configured")
-        data = None
-        headers = _sign(self._secret, method, path)
-        headers["Content-Type"] = "application/json"
-        if body is not None:
-            data = json.dumps(body).encode("utf-8")
-        req = urllib_request.Request(self._base_url + path, data=data, headers=headers, method=method.upper())
+        method = method.upper()
+        required = ("memory:read",) if method in ("GET", "HEAD") else ("memory:read", "memory:write")
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        headers = {"Authorization": f"Bearer {self._token(required)}"}
+        if data is not None:
+            headers["Content-Type"] = "application/json"
+        req = urllib_request.Request(self._base_url + path, data=data, headers=headers, method=method)
         with urllib_request.urlopen(req, timeout=20) as resp:
             return resp.read().decode("utf-8")
 
@@ -217,10 +264,10 @@ class ZenosMemoryProvider(MemoryProvider):
         def worker():
             try:
                 text = f"User: {user_content}\nAssistant: {assistant_content[:1500]}"
+                if self._looks_like_credential(text):
+                    logger.info("Zenos Memory skipped a credential-like turn; store secrets in an external vault")
+                    return
                 self._remember(text, memory_type="conversation", metadata={"source": "turn", "session_id": session_id})
-                # Never auto-store credentials from chat. Use zenos_memory_store_credential explicitly.
-                if self._looks_like_credential(user_content):
-                    logger.info("Zenos Memory skipped auto credential capture; explicit credential tool required")
             except Exception:
                 logger.debug("Zenos Memory sync failed", exc_info=True)
 
@@ -248,39 +295,14 @@ class ZenosMemoryProvider(MemoryProvider):
                 "parameters": {"type": "object", "properties": {"messages": {"type": "array"}, "namespace": {"type": "string"}, "reason": {"type": "string"}}, "required": ["messages"]},
             },
             {
-                "name": "zenos_memory_store_credential",
-                "description": "Store an API key, token or credential securely in Zenos Memory.",
-                "parameters": {"type": "object", "properties": {"service": {"type": "string"}, "key": {"type": "string"}, "description": {"type": "string"}, "namespace": {"type": "string"}}, "required": ["service", "key"]},
-            },
-            {
-                "name": "zenos_memory_get_credential",
-                "description": "Retrieve a stored credential by service name.",
-                "parameters": {"type": "object", "properties": {"service": {"type": "string"}, "namespace": {"type": "string"}}, "required": ["service"]},
-            },
-            {
                 "name": "zenos_memory_bootstrap",
                 "description": "Bootstrap from latest compact for context recovery.",
                 "parameters": {"type": "object", "properties": {"namespace": {"type": "string"}}, "required": []},
             },
             {
-                "name": "zenos_memory_maintain",
-                "description": "Run advanced memory maintenance: dedup plan, archive candidates, graph/index health.",
-                "parameters": {"type": "object", "properties": {"namespace": {"type": "string"}, "store": {"type": "boolean"}}, "required": []},
-            },
-            {
                 "name": "zenos_memory_graph_query",
                 "description": "Query the temporal graph with vector + graph traversal.",
                 "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "namespace": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["query"]},
-            },
-            {
-                "name": "zenos_memory_benchmark",
-                "description": "Run elite regression benchmark for vector, graph, lifecycle and compaction.",
-                "parameters": {"type": "object", "properties": {"skip_llm": {"type": "boolean"}}, "required": []},
-            },
-            {
-                "name": "zenos_memory_merge",
-                "description": "Build or apply duplicate merge plan.",
-                "parameters": {"type": "object", "properties": {"namespace": {"type": "string"}, "apply": {"type": "boolean"}}, "required": []},
             },
             {
                 "name": "zenos_memory_mermaid",
@@ -318,20 +340,12 @@ class ZenosMemoryProvider(MemoryProvider):
             if tool_name == "zenos_memory_report":
                 ns = args.get("namespace") or self._namespace
                 return json.dumps(self._request("GET", "/api/memory/daily-report?namespace=" + _urlquote(ns)), ensure_ascii=False)
-            if tool_name == "zenos_memory_maintain":
-                ns = args.get("namespace") or self._namespace
-                return json.dumps(self._request("POST", "/api/memory/maintain", {"namespace": ns, "store": args.get("store", True)}), ensure_ascii=False)
             if tool_name == "zenos_memory_graph_query":
                 ns = args.get("namespace") or self._namespace
                 return json.dumps(self._request("POST", "/api/memory/graph-query", {"namespace": ns, "query": args.get("query", ""), "limit": int(args.get("limit", 10))}), ensure_ascii=False)
             if tool_name == "zenos_memory_dashboard":
                 ns = args.get("namespace") or self._namespace
                 return json.dumps(self._request("GET", "/api/memory/dashboard?namespace=" + _urlquote(ns)), ensure_ascii=False)
-            if tool_name == "zenos_memory_benchmark":
-                return json.dumps(self._request("POST", "/api/memory/benchmark", {"skip_llm": args.get("skip_llm", False)}), ensure_ascii=False)
-            if tool_name == "zenos_memory_merge":
-                ns = args.get("namespace") or self._namespace
-                return json.dumps(self._request("POST", "/api/memory/merge", {"namespace": ns, "apply": args.get("apply", False)}), ensure_ascii=False)
             if tool_name == "zenos_memory_mermaid":
                 ns = args.get("namespace") or self._namespace
                 return json.dumps({"success": True, "mermaid": self._request_text("GET", "/api/memory/graph-mermaid?namespace=" + _urlquote(ns))}, ensure_ascii=False)

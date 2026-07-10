@@ -1,20 +1,35 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
+import { NextRequest } from 'next/server';
+import { z } from 'zod';
+import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
+import { errorResponse, requestId } from '../../../lib/errors';
+import { jsonResponse } from '../../../lib/http';
 import { getMemoryEngine } from '../../../lib/memory-engine';
 import { queryGraph } from '../../../lib/memory-maintainer';
 
+const GraphQuerySchema = z.object({
+  query: z.string().trim().min(1).max(4000),
+  namespace: z.string().optional().default('zenos'),
+  limit: z.number().int().positive().max(50).optional().default(10),
+});
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
 export async function POST(request: NextRequest) {
   if (!validateApiKey(request)) return unauthorizedResponse();
+  const id = requestId(request);
   try {
-    const body = await request.json().catch(() => ({}));
-    const query = body.query || '';
-    const namespace = body.namespace || 'zenos';
-    const limit = Math.min(50, Math.max(1, Number(body.limit || 10)));
-    const engine = getMemoryEngine();
-    const memories = await engine.recall({ query: '', namespace, limit: 500, include_low_quality: true, include_secrets: !!body.include_secrets });
-    const result = queryGraph(memories, query, limit);
-    return NextResponse.json({ success: true, namespace, ...result });
-  } catch (error: any) {
-    return NextResponse.json({ success: false, error: error.message || String(error) }, { status: 500 });
+    const parsed = GraphQuerySchema.parse(await request.json());
+    const memories = await getMemoryEngine().recall({
+      query: '',
+      namespace: parsed.namespace,
+      limit: 5000,
+      include_low_quality: true,
+      include_archived: true,
+    });
+    const result = queryGraph(memories, parsed.query, parsed.limit);
+    return jsonResponse({ success: true, namespace: parsed.namespace, ...result, request_id: id }, { requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
   }
 }

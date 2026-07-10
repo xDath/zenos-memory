@@ -1,33 +1,70 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
+import { NextRequest } from 'next/server';
+import { z } from 'zod';
+import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
+import { errorResponse, requestId } from '../../../lib/errors';
+import { jsonResponse } from '../../../lib/http';
 import { getMemoryEngine } from '../../../lib/memory-engine';
 import { buildDedupPlan } from '../../../lib/memory-maintainer';
 
+const MergeSchema = z.object({
+  namespace: z.string().optional().default('zenos'),
+  apply: z.boolean().optional().default(false),
+  max_apply: z.number().int().positive().max(20).optional().default(5),
+});
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
 export async function POST(request: NextRequest) {
   if (!validateApiKey(request)) return unauthorizedResponse();
-  const body = await request.json().catch(() => ({}));
-  const namespace = body.namespace || 'zenos';
-  const apply = !!body.apply;
-  const engine = getMemoryEngine();
-  const memories = await engine.recall({ query: '', namespace, limit: 500, include_low_quality: true, include_secrets: true });
-  const plan = buildDedupPlan(memories);
-  const applied: any[] = [];
+  const id = requestId(request);
+  try {
+    const parsed = MergeSchema.parse(await request.json().catch(() => ({})));
+    const engine = getMemoryEngine();
+    const memories = await engine.recall({
+      query: '',
+      namespace: parsed.namespace,
+      limit: 5000,
+      include_low_quality: true,
+      include_archived: false,
+    });
+    const plan = buildDedupPlan(memories);
+    const applied: Array<{ keep: string; merge: string }> = [];
 
-  if (apply) {
-    for (const item of plan.slice(0, Math.min(20, Number(body.max_apply || 5)))) {
-      const keep = memories.find(m => m.id === item.keep);
-      const merge = memories.find(m => m.id === item.merge);
-      if (!keep || !merge) continue;
-      const mergedContent = keep.content.includes(merge.content) ? keep.content : `${keep.content}\n\nMerged duplicate (${merge.id}): ${merge.content}`;
-      const related_ids = Array.from(new Set([...(keep.metadata.related_ids || []), merge.id, ...(merge.metadata.related_ids || [])]));
-      await engine.edit(keep.id, {
-        content: mergedContent,
-        metadata: { ...keep.metadata, related_ids, supersedes_ids: Array.from(new Set([...(keep.metadata.supersedes_ids || []), merge.id])) },
-      } as any, namespace);
-      await engine.forget(merge.id, namespace);
-      applied.push(item);
+    if (parsed.apply) {
+      const byId = new Map(memories.map(memory => [memory.id, memory]));
+      for (const item of plan.slice(0, parsed.max_apply)) {
+        const keep = byId.get(item.keep);
+        const merge = byId.get(item.merge);
+        if (!keep || !merge || keep.namespace !== merge.namespace) continue;
+        const content = keep.content.includes(merge.content)
+          ? keep.content
+          : `${keep.content}\n\n${merge.content}`;
+        const updated = await engine.edit(keep.id, {
+          content,
+          metadata: {
+            related_ids: [...new Set([...(keep.metadata.related_ids || []), ...(merge.metadata.related_ids || [])])],
+            supersedes_ids: [...new Set([...(keep.metadata.supersedes_ids || []), merge.id])],
+            tags: [...new Set([...(keep.metadata.tags || []), ...(merge.metadata.tags || [])])],
+            confidence: Math.max(keep.metadata.confidence, merge.metadata.confidence),
+            importance: Math.max(keep.metadata.importance, merge.metadata.importance),
+          },
+        }, parsed.namespace, keep.metadata.version);
+        if (!updated) continue;
+        await engine.forget(merge.id, parsed.namespace, merge.metadata.version);
+        applied.push({ keep: keep.id, merge: merge.id });
+      }
     }
-  }
 
-  return NextResponse.json({ success: true, namespace, apply, plan, applied });
+    return jsonResponse({
+      success: true,
+      namespace: parsed.namespace,
+      dry_run: !parsed.apply,
+      plan,
+      applied,
+      request_id: id,
+    }, { requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
+  }
 }

@@ -1,44 +1,51 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
-import { getMemoryEngine } from '../../../lib/memory-engine';
+import { NextRequest } from 'next/server';
+import { z } from 'zod';
 import { vectorSearch } from '../../../lib/advanced-memory';
+import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
+import { errorResponse, requestId } from '../../../lib/errors';
+import { jsonResponse } from '../../../lib/http';
+import { getMemoryEngine } from '../../../lib/memory-engine';
+import { MemoryTypeSchema } from '../../../lib/schema';
+
+const VectorSchema = z.object({
+  query: z.string().trim().min(1).max(4000),
+  namespace: z.string().optional().default('zenos'),
+  limit: z.number().int().positive().max(50).optional().default(10),
+  type: MemoryTypeSchema.optional(),
+});
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function POST(request: NextRequest) {
   if (!validateApiKey(request)) return unauthorizedResponse();
-
+  const id = requestId(request);
   try {
-    const body = await request.json().catch(() => ({}));
-    const query = body.query || '';
-    const namespace = body.namespace || 'zenos';
-    const limit = Math.min(50, Math.max(1, Number(body.limit || 10)));
-    const type = body.type;
-
-    const engine = getMemoryEngine();
-    const memories = await engine.recall({
+    const parsed = VectorSchema.parse(await request.json());
+    const memories = await getMemoryEngine().recall({
       query: '',
-      namespace,
-      limit: 500,
-      type,
+      namespace: parsed.namespace,
+      limit: 5000,
+      type: parsed.type,
       include_low_quality: true,
-      include_secrets: !!body.include_secrets,
+      include_archived: false,
     });
-
-    const results = vectorSearch(query, memories, limit).map(r => ({
-      id: r.id,
-      content: r.text,
-      vector_score: r.vector_score,
-      metadata: r.metadata,
+    const results = vectorSearch(parsed.query, memories, parsed.limit).map(result => ({
+      id: result.id,
+      content: result.text,
+      vector_score: Number(result.vector_score.toFixed(6)),
+      metadata: result.metadata,
     }));
-
-    return NextResponse.json({
+    return jsonResponse({
       success: true,
-      mode: 'advanced-deterministic-vector',
-      query,
-      namespace,
+      mode: 'deterministic-hashed-vector-baseline',
+      query: parsed.query,
+      namespace: parsed.namespace,
       count: results.length,
       results,
-    });
-  } catch (error: any) {
-    return NextResponse.json({ success: false, error: error.message || String(error) }, { status: 500 });
+      request_id: id,
+    }, { requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
   }
 }

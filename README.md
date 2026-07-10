@@ -1,277 +1,162 @@
 # Zenos Memory
 
-**Zenos Memory** is an educational, cloud-owned agent memory experiment for learning how long-term memory, compaction, retrieval, graph reasoning, and agent tooling can work together.
+Zenos Memory is a serverless, user-owned context continuity layer for AI agents.
 
-It demonstrates structured context compaction, bootstrap recovery, credential-aware storage patterns, hybrid retrieval, temporal graph reasoning, background maintenance, and protected APIs using Vercel plus Google Drive OAuth.
-
-> Learning-only notice: this repository is shared for study, experimentation, and portfolio/reference purposes. It is not a drop-in production service. Let an agent/operator review, configure, and harden the deployment before using it with real data.
-
-- **Demo:** https://zenos-memory.vercel.app
-- **Dashboard:** https://zenos-memory.vercel.app
-- **Public Status:** https://zenos-memory.vercel.app/api/memory/public-status
-- **Runtime:** Next.js on Vercel
-- **Storage:** Google Drive OAuth, owned by the user
-- **Auth Pattern:** Etla HMAC for protected endpoints
-- **LLM Enhancer:** OpenAI-compatible router (`MEMORY_LLM_*`) with deterministic fallback
-
-## Highlights
-
-- Google Drive OAuth structured storage
-- Etla HMAC protected API surface
-- Hermes provider integration
-- LLM-powered structured handoff, not plain summaries
-- Auto compact + bootstrap recovery
-- Credential-aware memory with secret filtering
-- Deterministic vector retrieval and neural-ready embedding endpoint
-- Temporal graph with weighted nodes, edges, source lineage, and chunk provenance
-- Knowledge-graph document ingestion with entity and relationship indexes
-- Hybrid retrieval ranker with vector, keyword, graph, recency, confidence, and current-state signals
-- Memory mutation engine for supersession, contradiction, and state-change tracking
-- Graph query and Mermaid visualization
-- Episode builder for temporal/provenance slices
-- Lightweight JS/Python SDK clients and CLI
-- Background maintainer and daily scheduler
-- Persistent lock lease audit
-- Elite benchmark endpoint
-- Public product dashboard with no sensitive data exposure
+Production compute runs in Vercel Functions. Canonical data remains in the owner's Google Drive as immutable, checksummed events and snapshots. The VPS only runs Hermes and a thin client plugin; it does not need to host the memory API or database.
 
 ## Architecture
 
 ```text
-Hermes / Zenos
-  -> Zenos Memory Provider
-  -> Etla HMAC signed HTTPS
-  -> Vercel Zenos Memory API
-  -> LLM enhancer (optional)
-  -> Google Drive OAuth structured storage
+Hermes / SDK / API client
+          |
+          | scoped bearer token
+          v
+Vercel Functions
+  - validation and secret rejection
+  - extraction and compaction
+  - hybrid retrieval and graph projection
+  - lifecycle and conflict logic
+  - snapshot/index maintenance
+          |
+          | Google Drive API
+          v
+Google Drive (canonical, user-owned)
+  zenos-memory-cloud/
+    namespaces/<namespace>/
+      events/YYYY-MM/*.json
+      snapshots/*.json
+      indexes/*.search.json
+      indexes/*.graph.json
+      coordination/*.json
 ```
 
-Drive layout:
+A warm function instance materializes the latest verified snapshot plus delta events into an ephemeral SQLite FTS5 cache. The cache is disposable. Cold starts reconstruct the same state from Drive.
 
-```text
-zenos-memory/
-  namespaces/
-    zenos/
-      memories.json
-      entities.json
-      relationships.json
-      profile.json
-      audit.json
-      compactions.json
-      indexes.json
-      tasks.json
-      decisions.json
-      artifacts.json
-      evals.json
-```
+## Consistency model
 
-## Public Endpoints
+- Writes are serialized per namespace with a Google Drive compare-and-swap lease.
+- Memory IDs are deterministic for identical namespace/type/content combinations.
+- Idempotency keys produce deterministic event IDs.
+- Events are immutable, checksummed, cursor ordered, and replayable.
+- Snapshots are immutable and selected by the highest event cursor, not by a mutable `current.json` pointer.
+- Invalid snapshots are ignored; older verified snapshots remain available.
+- Lifecycle state is explicit: `active`, `superseded`, or `archived`.
 
-These endpoints are intentionally safe to expose:
+## Security model
 
-```text
-GET /                              Product dashboard
-GET /dashboard                     Dashboard alias
-GET /api/memory/public-status      Public service status
-```
+- Production fails closed when authentication is not configured.
+- HMAC v2 token exchange binds timestamp, nonce, method, path, and request body hash.
+- Tokens are short lived and scoped: `memory:read`, `memory:write`, `memory:admin`.
+- Raw credentials, tokens, passwords, cookies, and private keys are rejected.
+- Memory may store only external references such as `vault://`, `secret://`, or `op://`.
+- Public endpoints expose capability metadata and liveness only.
 
-## Protected Runtime Endpoints
+## Main endpoints
 
-Protected endpoints require Etla HMAC headers:
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/auth` | Exchange an anti-replay HMAC signature for a scoped token |
+| `POST /api/memory/remember` | Append a durable memory mutation |
+| `POST /api/memory/recall` | Retrieve current memories |
+| `POST /api/memory/hybrid-recall` | Hybrid lexical/vector/graph/lifecycle retrieval |
+| `POST /api/memory/compact` | Create a redacted structured handoff |
+| `POST /api/memory/bootstrap` | Build a bounded recovery context |
+| `GET /api/memory/graph` | Project evidence-backed relationships |
+| `POST /api/memory/backup` | Write verified snapshot, search index, graph index, and portable backup |
+| `POST /api/memory/restore` | Verify and restore a snapshot |
+| `POST /api/memory/lock` | Acquire, renew, or release a Drive-backed lease |
+| `GET /api/memory/health-check` | Authenticated readiness and dependency evidence |
 
-```text
-POST /api/memory/remember
-POST /api/memory/recall
-POST /api/memory/hybrid-recall
-POST /api/memory/mutation-plan
-GET  /api/memory/timeline
-GET  /api/memory/episodes
-POST /api/memory/compact
-POST /api/memory/bootstrap
-POST /api/memory/vector
-POST /api/memory/embed
-GET  /api/memory/graph
-POST /api/memory/graph-query
-GET  /api/memory/graph-mermaid
-POST /api/memory/maintain
-POST /api/memory/benchmark
-GET  /api/memory/dashboard
-POST /api/memory/scheduler
-POST /api/memory/lock
-POST /api/memory/merge
-```
+## Environment
 
-## Environment Variables
-
-Use Vercel Environment Variables for a hosted learning deployment. Do not commit real values.
+Required for cloud production:
 
 ```bash
-ETLA_MASTER_SECRET=change_me
-ZENOS_MEMORY_API_KEY=change_me
+ETLA_MASTER_SECRET=...
+GOOGLE_OAUTH_CLIENT_ID=...
+GOOGLE_OAUTH_CLIENT_SECRET=...
+GOOGLE_OAUTH_REFRESH_TOKEN=...
+GOOGLE_DRIVE_FOLDER_NAME=Zenos Memory
+ZENOS_MEMORY_STORAGE_MODE=drive-events
+CRON_SECRET=...
+```
 
-GOOGLE_OAUTH_CLIENT_ID=your_client_id
-GOOGLE_OAUTH_CLIENT_SECRET=your_client_secret
-GOOGLE_OAUTH_REFRESH_TOKEN=your_refresh_token
-ZENOS_MEMORY_DRIVE_FOLDER_ID=root_or_folder_id
-ZENOS_MEMORY_DRIVE_STRUCTURED=true
+Optional LLM and embedding providers:
 
+```bash
 MEMORY_LLM_BASE_URL=https://router.example.com/v1
-MEMORY_LLM_API_KEY=your_router_key
-MEMORY_LLM_MODEL=provider/model-name
-MEMORY_LLM_FALLBACK_MODEL=provider/fallback-model
-MEMORY_EMBEDDING_MODEL=text-embedding-3-small
-
-CRON_SECRET=change_me
-USE_LOCAL_STORE=false
+MEMORY_LLM_API_KEY=...
+MEMORY_LLM_MODEL=provider/model
+MEMORY_LLM_FALLBACK_MODEL=provider/fallback
+MEMORY_EMBEDDING_MODEL=embedding-model
 ```
 
-A sanitized template is available in `.env.example`.
+See `.env.example` for the complete list.
 
-## Local Development
+## Local development
 
 ```bash
-npm install
-cp .env.example .env.local
+npm ci
 npm run dev
 ```
 
-The local server runs on the configured Next.js port.
-
-## Deploy
+Local development defaults to SQLite. To test the real cloud path using configured Google OAuth credentials:
 
 ```bash
+npm run smoke:cloud
+```
+
+## Quality gates
+
+```bash
+npm run typecheck
+npm run lint
+npm test
+npm run test:smoke
 npm run build
-npx vercel --prod --yes
+npm audit
 ```
 
-If using a saved Vercel token locally:
+The cloud integration gate verifies real Drive CAS locking, append-only writes, deterministic deduplication, immutable snapshot/index creation, cold-start recovery, and archive replay.
+
+## Migration
+
+Export and migrate the legacy Vercel/Drive deployment before replacing it:
 
 ```bash
-npx vercel --prod --token "$VERCEL_TOKEN" --yes
+npm run migrate:legacy-vercel -- zenos
 ```
 
-## Hermes Integration
+Initialize or compact a Drive event namespace:
 
-Hermes should consume Zenos Memory as a remote provider rather than modifying this repository during normal use.
-
-Hermes profile config:
-
-```yaml
-memory:
-  provider: zenos-memory
+```bash
+npm run migrate:drive-events -- zenos
 ```
 
-Provider plugin path:
+Legacy raw credential records are converted to archived vault references. Raw secret values are not copied into the new event store.
+
+## Deployment
+
+The repository is linked to Vercel. `vercel.json` configures:
+
+- Vercel Functions in Singapore;
+- Drive event mode;
+- a daily cron snapshot/index job;
+- strict build, test, and lint gates;
+- serverless duration limits.
+
+The production URL is:
 
 ```text
-~/.hermes/profiles/zenos/plugins/zenos-memory/__init__.py
+https://zenos-memory.vercel.app
 ```
 
-Install the Hermes plugin with non-secret defaults:
+## Hermes integration
 
-```bash
-./scripts/install-hermes-plugin.sh
-```
+The provider in `plugins/zenos-memory` performs token exchange, recall prefetch, turn synchronization, compact-before-compression, and bootstrap recovery. It never auto-stores credential-like turns.
 
-Provider config example:
+Installation and configuration are documented in `docs/HERMES_PLUGIN.md`.
 
-```json
-{
-  "base_url": "https://zenos-memory.vercel.app",
-  "secret": "<ETLA_MASTER_SECRET>",
-  "namespace": "zenos",
-  "prefetch_limit": 5,
-  "auto_compact_every": 10,
-  "auto_compact_min_chars": 6000,
-  "auto_compact_max_messages": 80
-}
-```
+## Product boundary
 
-Auto-compact runs every configured turn interval, triggers early for long transcripts, and preserves context before Hermes compression with `on_pre_compress`.
-
-## SDK / CLI
-
-Lightweight SDK clients are included for agents or operators that need a direct API bridge:
-
-```js
-import { ZenosMemoryClient } from './sdk/js/zenos-memory-client.mjs';
-const memory = new ZenosMemoryClient({ secret: process.env.ETLA_MASTER_SECRET });
-await memory.recall('auto compact', { namespace: 'zenos' });
-```
-
-```python
-from sdk.python.zenos_memory_client import ZenosMemoryClient
-memory = ZenosMemoryClient()
-memory.recall('auto compact', namespace='zenos')
-```
-
-The CLI uses the same HMAC flow:
-
-```bash
-ETLA_MASTER_SECRET="<ETLA_MASTER_SECRET>" npm run cli -- recall "auto compact" zenos
-ETLA_MASTER_SECRET="<ETLA_MASTER_SECRET>" npm run cli -- remember "important fact" zenos
-ETLA_MASTER_SECRET="<ETLA_MASTER_SECRET>" npm run cli -- ingest notes.md "$(cat notes.md)" zenos
-```
-
-For full setup, prefer letting the installing agent run `./scripts/install-hermes-plugin.sh`, configure Vercel environment variables, and connect Google Drive storage.
-
-## Smoke Test / CI
-
-```bash
-ETLA_MASTER_SECRET="<ETLA_MASTER_SECRET>" npm run smoke:prod
-```
-
-The smoke suite checks public status, hybrid recall, mutation planning, timeline, episodes, and benchmark v3.
-
-GitHub Actions also runs targeted lint/import checks and a secret-pattern scan for the learning/runtime surfaces.
-
-## Hermes Tools
-
-The provider can expose tools such as:
-
-```text
-zenos_memory_remember
-zenos_memory_search
-zenos_memory_report
-zenos_memory_compact
-zenos_memory_bootstrap
-zenos_memory_store_credential
-zenos_memory_get_credential
-zenos_memory_maintain
-zenos_memory_graph_query
-zenos_memory_dashboard
-zenos_memory_benchmark
-zenos_memory_merge
-zenos_memory_mermaid
-```
-
-## Security Model
-
-- No production secrets are stored in this repository.
-- Public dashboard and public status expose only safe metadata.
-- Protected runtime endpoints require Etla HMAC signing.
-- Credential memories are filtered from normal recall.
-- Secret retrieval requires explicit credential tooling.
-- Google Drive data is owned by the OAuth account, not by a third-party database.
-
-## Operational Guide
-
-See [`OPERATIONS.md`](./OPERATIONS.md) for deployment, troubleshooting, maintenance, and future-self instructions.
-
-See [`CREDENTIALS.md`](./CREDENTIALS.md) for secret management policy and environment setup.
-
-See [`SECURITY.md`](./SECURITY.md) for public repository security expectations.
-
-## Project Status
-
-This project is considered **done-final** as production infrastructure.
-
-Recommended future work:
-
-- Optional real neural embedding provider setup
-- Graph visualization UI improvements
-- Larger benchmark datasets
-- More strict Drive lock leases
-- Additional provider SDKs
-
-Built for Zenos / Hermes.
+Zenos Memory owns durable context, retrieval, lifecycle, compaction, and recovery. It does not own multi-agent execution, coding orchestration, or secret management. Those remain separate systems.

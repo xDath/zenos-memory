@@ -1,98 +1,98 @@
-# Security Policy
+# Zenos Memory Security
 
-Zenos Memory is designed to be safe as a public portfolio repository while keeping runtime data and credentials private.
+## Trust boundaries
 
-## Public Repository Policy
+Zenos Memory separates four trust zones:
 
-This repository must not contain production secrets, API keys, OAuth refresh tokens, service account JSON, private keys, or deployment tokens.
+1. Hermes, SDKs, and API clients.
+2. Vercel Functions as the stateless compute plane.
+3. Google Drive as the canonical user-owned data plane.
+4. External LLM, embedding, and secret-vault providers.
 
-Safe files may include:
+The VPS is not a memory database. Compromise or restart of the VPS must not destroy canonical Zenos Memory data.
 
-- source code
-- sanitized templates
-- documentation
-- endpoint descriptions
-- architecture diagrams
-- placeholder environment variables
+## Authentication
 
-Unsafe files must remain untracked:
+Production APIs use a two-step protocol:
 
-- `.env*`
-- `.vercel/`
-- `.next/`
-- `node_modules/`
-- private key files
-- local token files
+1. The client signs `timestamp`, `nonce`, HTTP method, canonical path, and SHA-256 request-body hash with `ETLA_MASTER_SECRET`.
+2. `/api/auth` returns a short-lived bearer token containing explicit scopes.
 
-## Runtime Secrets
+Replay protection is enforced with timestamp windows and nonce tracking. Production does not fall back to unauthenticated access.
 
-Production secrets must live in Vercel Environment Variables.
+Supported scopes:
 
-Local helper secrets must live outside the repository, for example:
+- `memory:read`
+- `memory:write`
+- `memory:admin`
 
-```text
-/root/.zenos-secrets/vercel-token.txt
-/root/.zenos-secrets/google-oauth-refresh-token.txt
-```
+## Secret policy
 
-## Protected APIs
+Zenos Memory is not a password manager.
 
-Operational memory endpoints require Etla HMAC signatures. Public endpoints expose only safe service metadata.
+Rejected content includes recognizable API keys, bearer tokens, passwords, refresh tokens, private keys, cookies, JWTs, and assigned-secret patterns. The legacy `credential` memory type is rejected for new writes.
 
-Public endpoints:
+Permitted secret records are references only:
 
 ```text
-GET /
-GET /dashboard
-GET /api/memory/public-status
+vault://...
+secret://...
+op://...
 ```
 
-Protected endpoints require signed headers:
+Legacy credentials migrated from the previous deployment are converted to archived, redacted `secret_reference` records. Raw values are not copied.
 
-```text
-x-etla-timestamp
-x-etla-signature
-```
+## Drive storage integrity
 
-## Credential Memory
+Canonical writes use immutable event files. Each event includes a checksum over its canonical payload. Snapshots also contain a checksum over the complete normalized memory state.
 
-Credentials can be stored as first-class memory objects with `type=credential`, but they are filtered from normal recall by default.
+A snapshot is accepted only after:
 
-Credential retrieval must be explicit via provider tooling or `include_secrets=true` on protected server-side calls.
+- schema validation;
+- checksum validation;
+- namespace validation;
+- cursor ordering validation.
 
-## Before Making The Repository Public
+Corrupt snapshots are skipped rather than replacing verified history.
 
-Run:
+## Concurrency
+
+Write operations acquire a per-namespace Drive coordination lease. Lease updates use conditional HTTP writes with `If-Match`, providing compare-and-swap behavior. Only the holder can append a namespace mutation during the lease window.
+
+Deterministic memory and event identifiers provide an additional convergence layer for retries and duplicate serverless invocations.
+
+## Data minimization
+
+Public endpoints expose only liveness and capability metadata. Authenticated health endpoints may expose counts, revisions, and storage status, but never memory contents or OAuth credentials.
+
+Application logs must not contain:
+
+- request authorization headers;
+- HMAC secrets;
+- OAuth refresh tokens;
+- memory contents;
+- raw LLM prompts containing private context.
+
+## Dependency and build policy
+
+A release requires:
 
 ```bash
-git grep -nE 'sk-|vcp_|ghp_|GOCSPX-|private_key|BEGIN PRIVATE KEY|shirinka' || true
+npm run typecheck
+npm run lint
+npm test
+npm run build
+npm audit
 ```
 
-Expected result: no real secrets. Placeholder values are acceptable if clearly redacted.
+Moderate or higher production dependency vulnerabilities block release unless there is a documented, reviewed exception.
 
-Also check ignored files:
+## Incident response
 
-```bash
-git status --ignored --short
-```
+1. Rotate `ETLA_MASTER_SECRET` and affected OAuth credentials.
+2. Disable the Vercel deployment or revoke the Google refresh token if active compromise is suspected.
+3. Preserve immutable Drive events and snapshots for analysis.
+4. Restore from the latest verified snapshot plus subsequent validated events.
+5. Review cloud audit events and Vercel function logs.
 
-## Reporting Issues
-
-If a real secret is found in Git history:
-
-1. Rotate the secret immediately.
-2. Remove it from Vercel/GitHub/local storage.
-3. Rewrite Git history if necessary.
-4. Force push only after confirming the new history is clean.
-
-## Security Scope
-
-This repository does not grant access to:
-
-- VPS instances
-- Google Drive contents
-- Vercel deployments
-- Hermes profile secrets
-- LLM router credentials
-
-Access depends on external secrets that must never be committed.
+Security reports should include the affected endpoint, expected behavior, reproduction steps, and whether any private memory content was exposed.

@@ -1,30 +1,29 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { EditRequestSchema } from '../../../lib/schema';
+import { NextRequest } from 'next/server';
+import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
+import { errorResponse, NotFoundError, requestId } from '../../../lib/errors';
+import { enforceRateLimit, jsonResponse } from '../../../lib/http';
 import { getMemoryEngine } from '../../../lib/memory-engine';
-import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
+import { EditRequestSchema } from '../../../lib/schema';
 
-export async function POST(request: NextRequest) {
-  if (!validateApiKey(request)) {
-    return unauthorizedResponse();
-  }
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
+export async function PATCH(request: NextRequest) {
+  if (!validateApiKey(request)) return unauthorizedResponse();
+  const id = requestId(request);
   try {
-    const body = await request.json();
-    const parsed = EditRequestSchema.parse(body);
-
-    const engine = getMemoryEngine();
-    const updated = await engine.edit(
-      parsed.id, 
-      { content: parsed.content, metadata: parsed.metadata as any }, 
-      parsed.namespace
-    );
-
-    if (!updated) {
-      return NextResponse.json({ error: 'Memory not found' }, { status: 404 });
-    }
-
-    return NextResponse.json({ success: true, memory: updated });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    enforceRateLimit(request, { bucket: 'edit', limit: 90 });
+    const parsed = EditRequestSchema.parse(await request.json());
+    const memory = await getMemoryEngine().edit(parsed.id, {
+      content: parsed.content,
+      namespace: parsed.namespace,
+      metadata: parsed.metadata,
+    }, parsed.namespace, parsed.expected_version);
+    if (!memory) throw new NotFoundError('Memory not found');
+    return jsonResponse({ success: true, memory, request_id: id }, { requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
   }
 }
+
+export const POST = PATCH;

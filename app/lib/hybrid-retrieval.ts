@@ -1,7 +1,7 @@
+import { buildTemporalGraph, cosineSimilarity, deterministicEmbedding } from './advanced-memory';
 import { Memory } from './schema';
-import { buildTemporalGraph, deterministicEmbedding, cosineSimilarity } from './advanced-memory';
 
-type HybridScore = {
+export type HybridScore = {
   memory: Memory;
   score: number;
   reason: string;
@@ -16,65 +16,103 @@ type HybridScore = {
   };
 };
 
-const STOP_WORDS = new Set(['the', 'and', 'for', 'with', 'yang', 'dan', 'atau', 'ini', 'itu', 'dari', 'untuk', 'gue', 'lu']);
+const STOP_WORDS = new Set([
+  'the', 'and', 'for', 'with', 'from', 'that', 'this',
+  'yang', 'dan', 'atau', 'ini', 'itu', 'dari', 'untuk', 'gue', 'lu',
+]);
 
 function tokens(text: string): string[] {
-  return text.toLowerCase().replace(/[^a-z0-9\s_-]/g, ' ').split(/\s+/).filter(t => t.length > 2 && !STOP_WORDS.has(t));
+  return text
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s_-]/gu, ' ')
+    .split(/\s+/)
+    .filter(token => token.length > 1 && !STOP_WORDS.has(token));
 }
 
 function keywordScore(query: string, text: string): number {
-  const q = new Set(tokens(query));
-  if (!q.size) return 0;
-  const body = new Set(tokens(text));
+  const queryTokens = new Set(tokens(query));
+  if (!queryTokens.size) return 0;
+  const bodyTokens = new Set(tokens(text));
   let hits = 0;
-  for (const item of q) if (body.has(item)) hits += 1;
-  return hits / q.size;
+  for (const token of queryTokens) if (bodyTokens.has(token)) hits += 1;
+  return hits / queryTokens.size;
 }
 
 function recencyScore(memory: Memory): number {
-  const ageDays = (Date.now() - new Date(memory.updated_at || memory.created_at).getTime()) / (1000 * 3600 * 24);
-  return Math.max(0, 1 - (ageDays / 45));
+  const timestamp = new Date(memory.updated_at || memory.created_at).getTime();
+  if (!Number.isFinite(timestamp)) return 0;
+  const ageDays = Math.max(0, (Date.now() - timestamp) / 86_400_000);
+  return Math.max(0, 1 - ageDays / 120);
 }
 
-function isCurrent(memory: Memory, supersededIds: Set<string>): number {
-  if (supersededIds.has(memory.id)) return 0;
+function currentScore(memory: Memory): number {
+  if (memory.metadata.status === 'superseded') return 0;
+  if (memory.metadata.status === 'archived') return 0.1;
   if (memory.metadata.provenance?.valid_to) return 0.2;
+  if (memory.metadata.expires_at && new Date(memory.metadata.expires_at).getTime() <= Date.now()) return 0;
   return 1;
 }
 
-function graphBoost(query: string, memory: Memory, all: Memory[]): number {
+function graphScores(query: string, memories: Memory[]): Map<string, number> {
   const queryTokens = new Set(tokens(query));
-  if (!queryTokens.size) return 0;
-  const graph = buildTemporalGraph(all);
-  const mentioned = new Set<string>();
-  for (const node of graph.nodes) {
-    if (tokens(node.label).some(t => queryTokens.has(t))) mentioned.add(node.id);
+  const result = new Map<string, number>();
+  if (!queryTokens.size || !memories.length) return result;
+
+  const graph = buildTemporalGraph(memories);
+  const matchedNodes = new Set(
+    graph.nodes
+      .filter(node => tokens(node.label).some(token => queryTokens.has(token)))
+      .map(node => node.id),
+  );
+  if (!matchedNodes.size) return result;
+
+  for (const edge of graph.edges) {
+    if (!matchedNodes.has(edge.source) && !matchedNodes.has(edge.target)) continue;
+    for (const candidate of [edge.memory_id, edge.source, edge.target]) {
+      if (!candidate || !memories.some(memory => memory.id === candidate)) continue;
+      result.set(candidate, Math.min(1, (result.get(candidate) || 0) + edge.weight / 6));
+    }
   }
-  if (!mentioned.size) return 0;
-  const edges = graph.edges.filter(edge => edge.memory_id === memory.id || edge.source === memory.id || edge.target === memory.id);
-  const connected = edges.some(edge => mentioned.has(edge.source) || mentioned.has(edge.target));
-  return connected ? Math.min(1, edges.length / 6) : 0;
+  return result;
 }
 
 export function rankHybrid(query: string, memories: Memory[], limit = 10): HybridScore[] {
-  const qv = deterministicEmbedding(query);
-  const supersededIds = new Set(memories.flatMap(memory => memory.metadata.supersedes_ids || []));
+  if (!memories.length) return [];
+  const queryVector = deterministicEmbedding(query);
+  const graph = graphScores(query, memories);
+  const emptyQuery = !query.trim();
 
   return memories
     .map(memory => {
-      const text = `${memory.content} ${(memory.metadata.tags || []).join(' ')} ${(memory.metadata.entities || []).join(' ')}`;
-      const vector = cosineSimilarity(qv, memory.embedding?.length ? memory.embedding : deterministicEmbedding(text));
-      const keyword = keywordScore(query, text);
-      const graph = graphBoost(query, memory, memories);
+      const text = `${memory.content} ${memory.metadata.tags.join(' ')} ${(memory.metadata.entities || []).join(' ')}`;
+      const vector = emptyQuery
+        ? 0
+        : cosineSimilarity(queryVector, memory.embedding?.length ? memory.embedding : deterministicEmbedding(text));
+      const keyword = emptyQuery ? 0 : keywordScore(query, text);
+      const graphSignal = graph.get(memory.id) || 0;
       const recency = recencyScore(memory);
       const importance = (memory.metadata.importance || 5) / 10;
       const confidence = memory.metadata.confidence || 0.8;
-      const current = isCurrent(memory, supersededIds);
-      const score = (vector * 36) + (keyword * 24) + (graph * 16) + (importance * 10) + (confidence * 8) + (recency * 4) + (current * 12);
-      const reason = current < 1 ? 'superseded-or-expired' : graph > 0.2 ? 'graph-vector-keyword' : keyword > 0.4 ? 'keyword-vector' : 'hybrid-vector';
-      return { memory, score, reason, signals: { vector, keyword, graph, recency, importance, confidence, current } };
+      const current = currentScore(memory);
+      const score = emptyQuery
+        ? importance * 30 + confidence * 25 + recency * 20 + current * 25
+        : vector * 34 + keyword * 28 + graphSignal * 14 + importance * 8 + confidence * 7 + recency * 4 + current * 12;
+      const reason = current === 0
+        ? 'superseded-or-expired'
+        : graphSignal >= 0.25
+          ? 'fts-vector-graph'
+          : keyword >= 0.5
+            ? 'fts-keyword-vector'
+            : 'fts-vector-quality';
+      return {
+        memory,
+        score,
+        reason,
+        signals: { vector, keyword, graph: graphSignal, recency, importance, confidence, current },
+      };
     })
-    .filter(item => item.signals.current > 0 || query.trim() === '')
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
+    .filter(item => item.signals.current > 0 || emptyQuery)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, Math.max(1, Math.min(limit, 100)));
 }

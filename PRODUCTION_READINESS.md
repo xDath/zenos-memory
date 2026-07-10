@@ -1,42 +1,74 @@
-# Zenos Memory Production Readiness
+# Zenos Memory 2.0 Production Readiness
 
-Status: production-ready learning deployment for LLM intelligence amplification.
+## Production contract
 
-## Goal
+Zenos Memory 2.0 is production-ready for its intended scope: a personal, serverless memory service with Vercel compute and Google Drive-owned canonical data.
 
-Zenos Memory raises the effective intelligence of LLMs in the Zenos/Hermes ecosystem by providing persistent memory, compacted working context, bootstrap recovery, retrieval, roadmap discipline, safety redaction, and benchmarked with/without-memory evaluation.
+It is not positioned as a multi-tenant database, distributed vector database, secret vault, or agent execution framework.
 
-## Current Live Evidence
+## Verified architecture
 
-- Public alias: `https://zenos-memory.vercel.app`
-- Public status: `/api/memory/public-status`
-- Regression benchmark: `zenos-memory-elite-regression-v9-intelligence-amplification`
-- Real A/B endpoint: `/api/memory/ab-eval`
-- A/B dataset: continuation recovery, pending task recall, scope drift resistance, secret safety
-- Dashboard: `/dashboard`
+- Compute: Vercel Functions.
+- Canonical store: append-only Google Drive event files.
+- Coordination: per-namespace Drive compare-and-swap leases.
+- Warm cache: disposable SQLite WAL + FTS5 in the function filesystem.
+- Recovery: highest-cursor verified snapshot plus validated delta events.
+- Maintenance: Vercel Cron snapshot, index, backup, and health run.
+- VPS: thin Hermes client only.
 
-## Production Gates
+## Release gates
 
-- Build: `npm run build`
-- Lint: `npm run lint -- --quiet`
-- Smoke: `node scripts/smoke-production.mjs`
-- Protected benchmark: signed `POST /api/memory/benchmark`
-- Public recall leak check: unsigned `GET /api/memory/recall?...` must return 401
-- Real A/B eval: signed `POST /api/memory/ab-eval`
+The following gates must be green:
 
-## Auth Bridge
+- strict TypeScript check;
+- ESLint with zero warnings;
+- unit, security, lifecycle, event replay, and snapshot tests;
+- local engine smoke;
+- real Google Drive cloud smoke;
+- Next.js production build;
+- zero known npm vulnerabilities;
+- production Vercel smoke after deployment.
 
-Runtime APIs are protected by Etla HMAC signatures using `ETLA_MASTER_SECRET`. The Hermes provider plugin at `/root/.hermes/profiles/zenos/plugins/zenos-memory/__init__.py` signs requests with the same secret. Automatic credential capture is disabled; credentials must be stored with explicit credential tools only. If a session-level wrapper asks for `ZENOS_MEMORY_API_KEY`, treat it as a separate compatibility path; prefer HMAC config or add an env bridge only for that wrapper.
+## Cloud integration evidence
 
-## Embedding Readiness
+`npm run smoke:cloud` performs real Google Drive operations and verifies:
 
-The current production baseline uses deterministic hashed embeddings plus hybrid retrieval. `/api/memory/embed` is neural-ready and can use the configured OpenAI-compatible router when embedding credentials are provided. Until then, deterministic retrieval remains the tested fallback.
+- CAS lease acquisition and release;
+- append-only event creation;
+- deterministic duplicate convergence;
+- update event replay;
+- immutable snapshot verification;
+- search index creation;
+- graph index creation;
+- deletion of the local cache followed by cold-start reconstruction;
+- archive event recovery after a second cold start.
 
-## Known Non-Blocking Debt
+## Migrated data
 
-- `@typescript-eslint/no-explicit-any` is downgraded to warning because this service handles untyped provider/Drive JSON payloads. Stricter typing can be done as a separate cleanup milestone.
-- Next build still skips TypeScript build errors via `ignoreBuildErrors`; build, lint quiet, smoke, benchmark, and A/B gates are the current production acceptance gates.
+The legacy Vercel deployment is exported before replacement. Valid memories are written to a verified cloud snapshot. Legacy secret records become archived vault references and raw secret values are not copied.
 
-## Operational Rule
+## Consistency guarantees
 
-Roadmap-first development remains mandatory. New features must map to recall, continuity, recovery, retrieval quality, reasoning support, verification, safety, or scope discipline.
+- A namespace has one active writer lease at a time.
+- Writes are replayable and deterministic.
+- Event and snapshot checksums detect mutation or partial upload.
+- Snapshot selection uses event cursor order.
+- Invalid snapshots do not replace verified history.
+- Identical memory writes converge to one deterministic memory ID.
+
+## Operational guarantees
+
+- A VPS restart does not affect canonical memory data.
+- A Vercel cold start rebuilds state from Drive.
+- A corrupt newest snapshot falls back to older verified state and delta events.
+- The public UI and status endpoint contain no private memory.
+- Raw credentials are rejected at ingestion and before LLM processing.
+
+## Known scope limits
+
+- Google Drive API latency is higher than a dedicated database.
+- This design is optimized for personal and low-to-moderate write concurrency.
+- Search indexes are portable artifacts; active retrieval still materializes the current state in the function cache.
+- External LLM quality depends on the configured provider and is not part of storage correctness.
+
+These limits are intentional tradeoffs for zero-idle-compute, personal ownership, portability, and a minimal VPS footprint.

@@ -1,45 +1,47 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
+import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
+import { errorResponse, requestId } from '../../../lib/errors';
+import { jsonResponse, parsePositiveInteger } from '../../../lib/http';
 import { getMemoryEngine } from '../../../lib/memory-engine';
-import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
   if (!validateApiKey(request)) return unauthorizedResponse();
-
-  const { searchParams } = new URL(request.url);
-  const namespace = searchParams.get('namespace') || 'zenos';
-  const limit = Number(searchParams.get('limit') || 12);
-
+  const id = requestId(request);
   try {
+    const url = new URL(request.url);
+    const namespace = url.searchParams.get('namespace') || 'zenos';
+    const limit = parsePositiveInteger(url.searchParams.get('limit'), 20, 100);
     const engine = getMemoryEngine();
-    const report = await engine.dailyIntelligenceReport(namespace);
-    const recent = await engine.list(namespace, Math.min(Math.max(limit, 1), 50));
-    const stats = await engine.getStats(namespace);
-    const graph = await engine.getRelationshipGraph(namespace);
-
-    const preferences = recent.filter(m => m.type === 'preference').slice(0, 8);
-    const projects = recent.filter(m => m.type === 'project').slice(0, 8);
-    const insights = await engine.generateInsights(namespace);
-
-    return NextResponse.json({
+    const [report, recent, stats, graph, generated] = await Promise.all([
+      engine.dailyIntelligenceReport(namespace),
+      engine.list(namespace, limit),
+      engine.getStats(namespace),
+      engine.getRelationshipGraph(namespace),
+      engine.generateInsights(namespace),
+    ]);
+    return jsonResponse({
       success: true,
       namespace,
       profile: {
         summary: report.summary,
         stats,
         health: report.health,
-        insights: report.insights,
-        generated_insights: insights.insights,
-        preferences,
-        projects,
+        insights: [...report.insights, ...generated.insights],
+        preferences: recent.filter(memory => memory.type === 'preference').slice(0, 12),
+        projects: recent.filter(memory => memory.type === 'project').slice(0, 12),
         recent,
         graph_summary: {
           nodes: graph.nodes.length,
           edges: graph.edges.length,
-          totalConnections: graph.totalConnections,
+          explicit_connections: graph.totalConnections,
         },
       },
-    });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+      request_id: id,
+    }, { requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
   }
 }

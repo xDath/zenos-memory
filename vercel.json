@@ -1,14 +1,30 @@
 {
-  "buildCommand": "next build",
-  "installCommand": "npm install",
+  "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "nextjs",
+  "installCommand": "npm ci",
+  "buildCommand": "npm run typecheck && npm run lint && npm test && next build",
+  "regions": ["sin1"],
+  "functions": {
+    "app/api/**/*.ts": {
+      "maxDuration": 60
+    }
+  },
   "env": {
-    "USE_LOCAL_STORE": "false"
+    "ZENOS_MEMORY_STORAGE_MODE": "drive-events",
+    "ZENOS_MEMORY_DEFAULT_NAMESPACE": "zenos",
+    "ZENOS_MEMORY_IMPORT_LEGACY_ON_START": "true",
+    "ZENOS_MEMORY_CLOUD_REFRESH_MS": "1000",
+    "ZENOS_MEMORY_WRITE_LEASE_MS": "25000",
+    "ZENOS_MEMORY_WRITE_WAIT_MS": "15000",
+    "ZENOS_MEMORY_ALLOW_INSECURE_DEV": "false",
+    "ZENOS_MEMORY_ALLOW_STATIC_API_KEY": "false",
+    "ZENOS_MEMORY_ALLOW_LEGACY_HMAC": "false",
+    "ZENOS_MEMORY_ALLOW_ADMIN_TOKEN_EXCHANGE": "true"
   },
   "crons": [
     {
-      "path": "/api/memory/scheduler?namespace=zenos",
-      "schedule": "0 3 * * *"
+      "path": "/api/memory/scheduler?namespace=zenos&backup=true&store_report=false",
+      "schedule": "17 3 * * *"
     }
   ]
 }

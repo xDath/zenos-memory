@@ -1,25 +1,30 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
+import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
+import { errorResponse, NotFoundError, requestId } from '../../../lib/errors';
+import { enforceRateLimit, jsonResponse } from '../../../lib/http';
 import { getMemoryEngine } from '../../../lib/memory-engine';
-import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
+import { ForgetRequestSchema } from '../../../lib/schema';
 
-export async function POST(request: NextRequest) {
-  if (!validateApiKey(request)) {
-    return unauthorizedResponse();
-  }
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
+export async function DELETE(request: NextRequest) {
+  if (!validateApiKey(request)) return unauthorizedResponse();
+  const id = requestId(request);
   try {
-    const body = await request.json();
-    const { id, namespace } = body;
-
-    if (!id) {
-      return NextResponse.json({ error: 'id required' }, { status: 400 });
-    }
-
-    const engine = getMemoryEngine();
-    const success = await engine.forget(id, namespace);
-
-    return NextResponse.json({ success, id });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    enforceRateLimit(request, { bucket: 'forget', limit: 60 });
+    const parsed = ForgetRequestSchema.parse(await request.json());
+    const removed = await getMemoryEngine().forget(
+      parsed.id,
+      parsed.namespace,
+      parsed.expected_version,
+      parsed.hard_delete || false,
+    );
+    if (!removed) throw new NotFoundError('Memory not found');
+    return jsonResponse({ success: true, archived: !parsed.hard_delete, request_id: id }, { requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
   }
 }
+
+export const POST = DELETE;
