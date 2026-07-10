@@ -1,21 +1,17 @@
-#!/bin/bash
-# Deploy Zenos Memory to Vercel
+#!/usr/bin/env bash
+# Deploy Zenos Memory to Vercel.
 # Usage: ./scripts/deploy-vercel.sh [vercel-token]
 
-set -e
+set -euo pipefail
 
-echo "🚀 Deploying Zenos Memory to Vercel..."
+echo "Deploying Zenos Memory to Vercel..."
 
-if [ -z "$1" ]; then
+if [ "$#" -eq 0 ]; then
   npx vercel --prod --yes
 else
   npx vercel --prod --token "$1" --yes
 fi
 
-echo "✅ Deploy done!"
-echo ""
-echo "Make sure these env vars are set in Vercel Dashboard:"
-echo "  GOOGLE_SERVICE_ACCOUNT_KEY= (full JSON as string)"
-echo "  ZENOS_MEMORY_DRIVE_FOLDER_ID=15Gsy7dgsanrAZ-6Aq1HIHvjNjAJV51An"
-echo "  ZENOS_MEMORY_API_KEY=your-key"
-echo "  USE_LOCAL_STORE=false"
+echo "Deployment complete."
+echo "Required production variable names are documented in CREDENTIALS.md."
+echo "Never place credential values or Drive identifiers in this script or Git history."
