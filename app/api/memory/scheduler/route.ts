@@ -11,6 +11,7 @@ const SchedulerSchema = z.object({
   namespace: z.string().optional().default('zenos'),
   apply_decay: z.boolean().optional().default(true),
   backup: z.boolean().optional().default(true),
+  prune: z.boolean().optional().default(true),
   store_report: z.boolean().optional().default(false),
 });
 
@@ -63,6 +64,7 @@ async function runMaintenance(request: NextRequest, input: unknown) {
     const before = buildMaintenanceReport(memoriesBefore);
     const decayed = parsed.apply_decay ? await engine.applyTemporalDecay(parsed.namespace) : 0;
     const backup = parsed.backup ? await engine.backupMemories(parsed.namespace) : null;
+    const retention = parsed.prune ? await engine.pruneCloudArtifacts(parsed.namespace) : null;
     const health = await engine.memoryHealthCheck(parsed.namespace);
 
     if (parsed.store_report) {
@@ -76,6 +78,7 @@ async function runMaintenance(request: NextRequest, input: unknown) {
           health,
           maintenance: before,
           backup: backup ? { destination: backup.destination, verified: backup.verified } : null,
+          retention,
         }),
         type: 'insight',
         namespace: parsed.namespace,
@@ -94,6 +97,7 @@ async function runMaintenance(request: NextRequest, input: unknown) {
       namespace: parsed.namespace,
       decayed,
       backup,
+      retention,
       health,
       maintenance: before,
       request_id: id,
@@ -121,6 +125,7 @@ export async function GET(request: NextRequest) {
     namespace: params.get('namespace') || 'zenos',
     apply_decay: queryBoolean(params.get('apply_decay'), true),
     backup: queryBoolean(params.get('backup'), true),
+    prune: queryBoolean(params.get('prune'), true),
     store_report: queryBoolean(params.get('store_report'), false),
   });
 }

@@ -43,3 +43,12 @@ next-env.d.ts
 # python
 __pycache__/
 *.py[cod]
+
+# Local Zenos Runtime working copies do not belong to the Memory product.
+/app/api/memory/runtime/
+/app/lib/zenos-runtime.ts
+/app/lib/zenos-runtime-executor.ts
+/docs/zenos-runtime-*.md
+/scripts/zenos-runtime-cli.mjs
+/scripts/smoke-runtime.mjs
+/zenos-runtime-roadmap.md

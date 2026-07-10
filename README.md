@@ -35,10 +35,13 @@ A warm function instance materializes the latest verified snapshot plus delta ev
 ## Consistency model
 
 - Writes are serialized per namespace with a Google Drive compare-and-swap lease.
+- Reads on a warm instance wait for the active namespace write to commit or roll back.
+- Failed or partially uploaded batches are re-materialized from durable Drive events before the cache is served again.
 - Memory IDs are deterministic for identical namespace/type/content combinations.
-- Idempotency keys produce deterministic event IDs.
-- Events are immutable, checksummed, cursor ordered, and replayable.
-- Snapshots are immutable and selected by the highest event cursor, not by a mutable `current.json` pointer.
+- Idempotency keys produce deterministic event IDs, including document-ingestion chunks.
+- Events are immutable, checksummed, cursor ordered, replayable, and uploaded concurrently in bounded batches.
+- Snapshots and portable backups are content-addressed, immutable, and reused on duplicate cron delivery.
+- Snapshot, index, and portable-backup retention is bounded while canonical event history remains append-only.
 - Invalid snapshots are ignored; older verified snapshots remain available.
 - Lifecycle state is explicit: `active`, `superseded`, or `archived`.
 
@@ -104,6 +107,7 @@ Local development defaults to SQLite. To test the real cloud path using configur
 
 ```bash
 npm run smoke:cloud
+npm run smoke:concurrency
 ```
 
 ## Quality gates
@@ -117,7 +121,7 @@ npm run build
 npm audit
 ```
 
-The cloud integration gate verifies real Drive CAS locking, append-only writes, deterministic deduplication, immutable snapshot/index creation, cold-start recovery, and archive replay.
+The cloud integration gates verify real Drive CAS locking and handoff, cross-instance concurrent writes, global retry idempotency, bounded parallel event flushing, content-addressed snapshot/backup reuse, cold-start recovery, and archive replay.
 
 ## Migration
 

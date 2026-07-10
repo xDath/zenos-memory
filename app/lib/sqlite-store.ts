@@ -616,6 +616,10 @@ export class SqliteMemoryStore {
     `).run(key, operation, JSON.stringify(response), now.toISOString(), expires.toISOString());
   }
 
+  deleteIdempotent(key: string, operation: string): void {
+    this.db.prepare('DELETE FROM idempotency_keys WHERE key = ? AND operation = ?').run(key, operation);
+  }
+
   acquireLease(resource: string, namespace: string, owner: string, ttlMs: number): LeaseRecord | null {
     return this.transaction(() => {
       const now = new Date();

@@ -58,6 +58,7 @@ export const MemoryMetadataSchema = z
     supersedes_ids: z.array(z.string().uuid()).max(256).default([]),
     access_count: z.number().int().nonnegative().default(0),
     last_accessed_at: z.string().datetime().optional(),
+    last_decay_at: z.string().datetime().optional(),
     redacted: z.boolean().default(false),
     secret_reference: z.string().max(1024).optional(),
     credential_for: z.string().max(160).optional(), // legacy compatibility only

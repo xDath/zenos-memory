@@ -1,8 +1,8 @@
-# Zenos Memory 2.0 Production Readiness
+# Zenos Memory 2.1 Production Readiness
 
 ## Production contract
 
-Zenos Memory 2.0 is production-ready for its intended scope: a personal, serverless memory service with Vercel compute and Google Drive-owned canonical data.
+Zenos Memory 2.1 is production-ready for its intended scope: a personal, serverless memory service with Vercel compute and Google Drive-owned canonical data.
 
 It is not positioned as a multi-tenant database, distributed vector database, secret vault, or agent execution framework.
 
@@ -24,7 +24,7 @@ The following gates must be green:
 - ESLint with zero warnings;
 - unit, security, lifecycle, event replay, and snapshot tests;
 - local engine smoke;
-- real Google Drive cloud smoke;
+- real Google Drive cloud and concurrent-writer smoke tests;
 - Next.js production build;
 - zero known npm vulnerabilities;
 - production Vercel smoke after deployment.
@@ -33,11 +33,12 @@ The following gates must be green:
 
 `npm run smoke:cloud` performs real Google Drive operations and verifies:
 
-- CAS lease acquisition and release;
-- append-only event creation;
-- deterministic duplicate convergence;
+- CAS lease acquisition, exclusivity, and handoff across independent clients;
+- append-only event creation and bounded parallel batch flushing;
+- deterministic duplicate convergence across serverless instances;
+- partial-batch failure rollback and safe retry convergence;
 - update event replay;
-- immutable snapshot verification;
+- content-addressed immutable snapshot and portable-backup reuse;
 - search index creation;
 - graph index creation;
 - deletion of the local cache followed by cold-start reconstruction;
@@ -50,11 +51,15 @@ The legacy Vercel deployment is exported before replacement. Valid memories are 
 ## Consistency guarantees
 
 - A namespace has one active writer lease at a time.
-- Writes are replayable and deterministic.
+- Warm-instance reads are isolated behind a commit barrier while a namespace write is in flight.
+- Failed uploads force canonical re-materialization before the cache is served.
+- Writes and document-ingestion retries are replayable and deterministic.
 - Event and snapshot checksums detect mutation or partial upload.
 - Snapshot selection uses event cursor order.
 - Invalid snapshots do not replace verified history.
 - Identical memory writes converge to one deterministic memory ID.
+- Duplicate cron delivery reuses the same content-addressed snapshot and backup artifacts.
+- Snapshot/index and portable-backup retention is bounded without deleting canonical event history.
 
 ## Operational guarantees
 

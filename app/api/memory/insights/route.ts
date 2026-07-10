@@ -1,12 +1,24 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
+import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
+import { errorResponse, requestId } from '../../../lib/errors';
+import { jsonResponse } from '../../../lib/http';
 import { getMemoryEngine } from '../../../lib/memory-engine';
-import { validateApiKey, unauthorizedResponse } from '../../../lib/auth';
+import { normalizeNamespace } from '../../../lib/schema';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
   if (!validateApiKey(request)) return unauthorizedResponse();
-  const { searchParams } = new URL(request.url);
-  const namespace = searchParams.get('namespace') || 'default';
-  const engine = getMemoryEngine();
-  const insights = await engine.generateInsights(namespace);
-  return NextResponse.json({ success: true, insights });
+  const id = requestId(request);
+  try {
+    const { searchParams } = new URL(request.url);
+    const namespace = normalizeNamespace(
+      searchParams.get('namespace') || process.env.ZENOS_MEMORY_DEFAULT_NAMESPACE || 'zenos',
+    );
+    const insights = await getMemoryEngine().generateInsights(namespace);
+    return jsonResponse({ success: true, namespace, insights, request_id: id }, { requestId: id });
+  } catch (error) {
+    return errorResponse(error, id);
+  }
 }

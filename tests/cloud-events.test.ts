@@ -97,6 +97,20 @@ test('materialization is ordered, idempotent and cold-start reproducible', () =>
   assert.deepEqual(repeated.memories, state.memories);
 });
 
+test('snapshots are content-addressed for duplicate cron delivery', () => {
+  const created = buildCloudEvent({
+    namespace: 'cloud-test',
+    action: 'memory_created',
+    occurredAt: '2026-07-10T00:00:01.000Z',
+    changes: [{ operation: 'upsert', memory: memory(firstId, 'Stable snapshot state') }],
+  });
+  const state = materializeCloudState({ namespace: 'cloud-test', events: [created] });
+  const first = buildCloudSnapshot(state);
+  const second = buildCloudSnapshot(state);
+  assert.equal(first.snapshot_id, second.snapshot_id);
+  assert.equal(first.checksum, second.checksum);
+});
+
 test('snapshot plus delta events rebuilds the exact state', () => {
   const created = buildCloudEvent({
     namespace: 'cloud-test',

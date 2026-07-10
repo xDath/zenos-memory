@@ -40,6 +40,7 @@ Commands:
 ```bash
 npm run check
 npm run smoke:cloud
+npm run smoke:concurrency
 npm run migrate:legacy-vercel -- zenos
 git push origin master
 ZENOS_MEMORY_URL=https://zenos-memory.vercel.app npm run smoke:prod
@@ -50,8 +51,10 @@ ZENOS_MEMORY_URL=https://zenos-memory.vercel.app npm run smoke:prod
 Vercel Cron calls:
 
 ```text
-/api/memory/scheduler?namespace=zenos&backup=true&store_report=false
+/api/memory/scheduler
 ```
+
+The route defaults to namespace `zenos`, backup enabled, retention enabled, and report storage disabled. `CRON_SECRET` authenticates the request.
 
 The job:
 
@@ -60,7 +63,9 @@ The job:
 - applies temporal decay where required;
 - creates an immutable canonical snapshot;
 - creates search and graph indexes;
-- creates a portable checksum-verified backup;
+- creates or reuses a content-addressed portable checksum-verified backup;
+- prunes old snapshots, indexes, portable-backup day folders, and expired smoke-test namespaces according to retention settings;
+- applies temporal decay at most once per memory per UTC day;
 - runs memory health checks.
 
 ## Recovery
@@ -72,7 +77,7 @@ Canonical recovery requires no VPS disk.
 3. List event month folders at or after the snapshot cursor month.
 4. Validate and sort delta events by cursor.
 5. Replay events into an empty materialized view.
-6. Ignore corrupt snapshots/events and retain the last verified state.
+6. Skip corrupt snapshots, but fail closed and alert on an invalid delta event instead of silently losing a mutation.
 
 The application performs these steps automatically on a cold function instance.
 
@@ -132,6 +137,10 @@ Actions:
 - refresh or re-authorize OAuth;
 - do not switch to an ephemeral filesystem as canonical storage.
 
+### Partial batch upload
+
+Completed immutable events remain durable. The warm cache is rebuilt from Drive before another read is served, local idempotency entries are cleared, and retrying the same batch converges through deterministic event IDs.
+
 ### Lease contention
 
 Symptoms: HTTP 409 or write timeout.
@@ -140,7 +149,7 @@ Actions:
 
 - allow the active lease to expire;
 - inspect the namespace coordination file;
-- verify Vercel functions are not exceeding their duration;
+- verify Vercel functions are not exceeding their duration and the write lease remains longer than the function timeout;
 - avoid manually editing coordination files while writes are active.
 
 ### Invalid snapshot

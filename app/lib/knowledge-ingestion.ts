@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { RememberRequest } from './schema';
 
 type Chunk = {
@@ -71,6 +72,20 @@ export function chunkDocument(content: string, maxChars = 1400): Chunk[] {
 
   for (const block of blocks) {
     const blockHeading = detectHeading(block);
+    if (block.length > maxChars) {
+      flush();
+      for (let offset = 0; offset < block.length; offset += maxChars) {
+        const part = block.slice(offset, offset + maxChars).trim();
+        if (!part) continue;
+        chunks.push({
+          index: chunks.length,
+          content: part,
+          heading: offset === 0 ? blockHeading : undefined,
+          tokens: tokenize(part),
+        });
+      }
+      continue;
+    }
     if ((current.length + block.length + 2) > maxChars) flush();
     if (!current && blockHeading) heading = blockHeading;
     current = current ? `${current}\n\n${block}` : block;
@@ -130,10 +145,15 @@ export function buildKnowledgeMemories(content: string, filename: string, namesp
   const chunks = chunkDocument(content);
   const entityLinks = extractEntityLinks(chunks);
   const relationships = extractRelationships(chunks);
-  const docId = `${filename}:${Date.now()}`;
+  const sourceHash = createHash('sha256').update(content).digest('hex');
+  const docId = `${filename}:${sourceHash.slice(0, 24)}`;
+  const idempotencyKey = (kind: string) => createHash('sha256')
+    .update(`ingest:${namespace}:${docId}:${kind}`)
+    .digest('hex');
 
   const memories: RememberRequest[] = chunks.slice(0, 80).map(chunk => ({
     content: chunk.content,
+    idempotency_key: idempotencyKey(`chunk:${chunk.index}`),
     type: 'file',
     namespace,
     metadata: {
@@ -141,6 +161,7 @@ export function buildKnowledgeMemories(content: string, filename: string, namesp
       provenance: {
         created_by: agentId || 'knowledge-ingestion',
         source_id: docId,
+        source_hash: sourceHash,
         chunk_index: chunk.index,
         heading: chunk.heading,
       },
@@ -154,11 +175,16 @@ export function buildKnowledgeMemories(content: string, filename: string, namesp
   if (entityLinks.length) {
     memories.push({
       content: JSON.stringify({ filename, entity_links: entityLinks.slice(0, 40) }),
+      idempotency_key: idempotencyKey('entity-index'),
       type: 'insight',
       namespace,
       metadata: {
         source: `file:${filename}:entity-index`,
-        provenance: { created_by: agentId || 'knowledge-ingestion', source_id: docId },
+        provenance: {
+          created_by: agentId || 'knowledge-ingestion',
+          source_id: docId,
+          source_hash: sourceHash,
+        },
         tags: ['knowledge-index', 'entity-index', filename],
         entities: entityLinks.slice(0, 20).map(link => link.entity),
         importance: 8,
@@ -170,11 +196,16 @@ export function buildKnowledgeMemories(content: string, filename: string, namesp
   if (relationships.length) {
     memories.push({
       content: JSON.stringify({ filename, relationships: relationships.slice(0, 60) }),
+      idempotency_key: idempotencyKey('relationship-index'),
       type: 'relationship',
       namespace,
       metadata: {
         source: `file:${filename}:relationship-index`,
-        provenance: { created_by: agentId || 'knowledge-ingestion', source_id: docId },
+        provenance: {
+          created_by: agentId || 'knowledge-ingestion',
+          source_id: docId,
+          source_hash: sourceHash,
+        },
         tags: ['knowledge-graph', 'relationship-index', filename],
         entities: [...new Set(relationships.flatMap(rel => [rel.source, rel.target]))].slice(0, 30),
         importance: 8,

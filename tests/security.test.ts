@@ -4,7 +4,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { issueEtlaToken, sha256Body, validateApiKey, verifyEtlaToken } from '../app/lib/auth';
+import {
+  authenticateTokenExchange,
+  issueEtlaToken,
+  sha256Body,
+  validateApiKey,
+  verifyEtlaSignature,
+  verifyEtlaToken,
+} from '../app/lib/auth';
 import { SensitiveDataError } from '../app/lib/errors';
 import { MemoryEngine } from '../app/lib/memory-engine';
 import { SqliteMemoryStore } from '../app/lib/sqlite-store';
@@ -35,25 +42,71 @@ test('scoped tokens enforce read/write boundaries', () => {
   assert.ok(verifyEtlaToken(writeToken, secret, 'memory:write'));
 });
 
-test('v2 HMAC token exchange rejects replayed nonces', () => {
+test('v2 HMAC verifies before consuming nonce and token exchange rejects replay', async () => {
   const secret = randomBytes(32).toString('hex');
   const timestamp = Date.now();
   const nonce = randomBytes(18).toString('base64url');
-  const request = new Request('https://memory.example/api/auth', { method: 'POST' });
   const bodyHash = sha256Body('');
   const canonical = ['zenos-memory-signature-v2', timestamp, nonce, 'POST', '/api/auth', bodyHash].join('\n');
   const signature = createHmac('sha256', secret).update(canonical).digest('hex');
-  const signed = new Request(request, {
+  const headers = {
+    'x-etla-timestamp': String(timestamp),
+    'x-etla-nonce': nonce,
+    'x-etla-content-sha256': bodyHash,
+  };
+  const invalid = new Request('https://memory.example/api/auth', {
+    method: 'POST',
+    headers: { ...headers, 'x-etla-signature': '0'.repeat(64) },
+  });
+  const signed = new Request('https://memory.example/api/auth', {
+    method: 'POST',
+    headers: { ...headers, 'x-etla-signature': signature },
+  });
+
+  assert.equal(verifyEtlaSignature(invalid, secret), false);
+  assert.equal(verifyEtlaSignature(signed, secret), true);
+
+  const secondNonce = randomBytes(18).toString('base64url');
+  const secondCanonical = ['zenos-memory-signature-v2', timestamp, secondNonce, 'POST', '/api/auth', bodyHash].join('\n');
+  const exchange = new Request('https://memory.example/api/auth', {
+    method: 'POST',
+    headers: {
+      ...headers,
+      'x-etla-nonce': secondNonce,
+      'x-etla-signature': createHmac('sha256', secret).update(secondCanonical).digest('hex'),
+    },
+  });
+  const previousSecret = process.env.ETLA_MASTER_SECRET;
+  const previousMode = process.env.ZENOS_MEMORY_STORAGE_MODE;
+  try {
+    process.env.ETLA_MASTER_SECRET = secret;
+    delete process.env.ZENOS_MEMORY_STORAGE_MODE;
+    assert.equal(await authenticateTokenExchange(exchange), true);
+    assert.equal(await authenticateTokenExchange(exchange), false);
+  } finally {
+    if (previousSecret === undefined) delete process.env.ETLA_MASTER_SECRET;
+    else process.env.ETLA_MASTER_SECRET = previousSecret;
+    if (previousMode === undefined) delete process.env.ZENOS_MEMORY_STORAGE_MODE;
+    else process.env.ZENOS_MEMORY_STORAGE_MODE = previousMode;
+  }
+});
+
+test('production endpoints reject direct HMAC and require scoped bearer tokens', () => {
+  const secret = randomBytes(32).toString('hex');
+  const timestamp = Date.now();
+  const nonce = randomBytes(18).toString('base64url');
+  const bodyHash = sha256Body('');
+  const canonical = ['zenos-memory-signature-v2', timestamp, nonce, 'GET', '/api/memory/stats', bodyHash].join('\n');
+  const request = new Request('https://memory.example/api/memory/stats', {
     headers: {
       'x-etla-timestamp': String(timestamp),
       'x-etla-nonce': nonce,
       'x-etla-content-sha256': bodyHash,
-      'x-etla-signature': signature,
+      'x-etla-signature': createHmac('sha256', secret).update(canonical).digest('hex'),
     },
   });
   withEnvironment({ NODE_ENV: 'production', ETLA_MASTER_SECRET: secret }, () => {
-    assert.equal(validateApiKey(signed), true);
-    assert.equal(validateApiKey(signed), false);
+    assert.equal(validateApiKey(request), false);
   });
 });
 

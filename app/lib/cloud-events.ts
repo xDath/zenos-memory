@@ -241,7 +241,8 @@ export function materializeCloudState(input: {
 export function buildCloudSnapshot(state: MaterializedCloudState): CloudSnapshot {
   const generatedAt = new Date().toISOString();
   const memories = canonicalizeMemories(state.memories);
-  const snapshotId = sha256(`snapshot:${state.namespace}:${state.cursor || 'origin'}:${generatedAt}`);
+  const checksum = sha256(memories);
+  const snapshotId = sha256(`snapshot:${state.namespace}:${state.cursor || 'origin'}:${state.event_count}:${checksum}`);
   return CloudSnapshotSchema.parse({
     format: 'zenos-memory-cloud-snapshot-v1',
     snapshot_id: snapshotId,
@@ -249,7 +250,7 @@ export function buildCloudSnapshot(state: MaterializedCloudState): CloudSnapshot
     generated_at: generatedAt,
     through_cursor: state.cursor,
     event_count: state.event_count,
-    checksum: sha256(memories),
+    checksum,
     memories,
   });
 }

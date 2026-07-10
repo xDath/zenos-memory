@@ -58,6 +58,7 @@ function cleanExpiredNonces(now: number): void {
 function claimNonce(nonce: string, now: number): boolean {
   cleanExpiredNonces(now);
   if (!/^[a-zA-Z0-9_-]{16,128}$/.test(nonce) || usedNonces.has(nonce)) return false;
+  if (usedNonces.size >= 10_000) return false;
   usedNonces.set(nonce, now + NONCE_TTL_MS);
   return true;
 }
@@ -88,13 +89,13 @@ function verifySignatureV2(request: Request, secret: string, consumeNonce = true
 
   if (!Number.isSafeInteger(timestamp) || Math.abs(now - timestamp) > MAX_CLOCK_SKEW_MS) return false;
   if (!/^[a-f0-9]{64}$/i.test(bodyHash)) return false;
-  if (consumeNonce && !claimNonce(nonce, now)) return false;
-  if (!consumeNonce && !/^[a-zA-Z0-9_-]{16,128}$/.test(nonce)) return false;
+  if (!/^[a-zA-Z0-9_-]{16,128}$/.test(nonce)) return false;
 
   const expected = createHmac('sha256', secret)
     .update(canonicalV2(request, timestamp, nonce, bodyHash), 'utf8')
     .digest('hex');
-  return safeEqualHex(signature, expected);
+  if (!safeEqualHex(signature, expected)) return false;
+  return !consumeNonce || claimNonce(nonce, now);
 }
 
 function verifyLegacySignature(request: Request, secret: string): boolean {
@@ -117,9 +118,9 @@ function scopeIncludes(granted: AuthScope[], required: AuthScope): boolean {
 function requiredScope(request: Request): AuthScope {
   const path = new URL(request.url).pathname;
   const method = request.method.toUpperCase();
-  if (/\/(?:backup|restore|debug-drive|benchmark|ab-eval|eval|maintain|scheduler|merge|lock)(?:\/|$)/.test(path)) return 'memory:admin';
+  if (/\/(?:backup|restore|debug-drive|benchmark|ab-eval|eval|maintain|scheduler|merge|lock|agent\/test-llm)(?:\/|$)/.test(path)) return 'memory:admin';
   if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return 'memory:read';
-  if (/\/(?:recall|hybrid-recall|answer|bootstrap|graph-query|vector)(?:\/|$)/.test(path)) return 'memory:read';
+  if (/\/(?:recall|hybrid-recall|answer|bootstrap|graph-query|vector|embed|auto-tag|mutation-plan|conflicts|resolve-conflict)(?:\/|$)/.test(path)) return 'memory:read';
   return 'memory:write';
 }
 
@@ -181,10 +182,8 @@ export function validateApiKey(request: Request): boolean {
     const token = tokenFromRequest(request);
     if (token && verifyEtlaToken(token, secret, required)) return true;
 
-    const path = new URL(request.url).pathname;
-    const safeDirectSignature = request.method === 'GET'
-      || request.method === 'HEAD'
-      || path === '/api/auth';
+    const safeDirectSignature = !production
+      && (request.method === 'GET' || request.method === 'HEAD');
     if (safeDirectSignature && verifyEtlaSignature(request, secret)) return true;
   }
 

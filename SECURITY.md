@@ -18,7 +18,7 @@ Production APIs use a two-step protocol:
 1. The client signs `timestamp`, `nonce`, HTTP method, canonical path, and SHA-256 request-body hash with `ETLA_MASTER_SECRET`.
 2. `/api/auth` returns a short-lived bearer token containing explicit scopes.
 
-Replay protection is enforced with timestamp windows and nonce tracking. Production does not fall back to unauthenticated access.
+Replay protection is enforced with timestamp windows and a bounded nonce registry. A signature is verified before its nonce is consumed. In production, HMAC is accepted only by the token-exchange endpoint; protected APIs require a scoped bearer token.
 
 Supported scopes:
 
@@ -59,7 +59,9 @@ Corrupt snapshots are skipped rather than replacing verified history.
 
 Write operations acquire a per-namespace Drive coordination lease. Lease updates use conditional HTTP writes with `If-Match`, providing compare-and-swap behavior. Only the holder can append a namespace mutation during the lease window.
 
-Deterministic memory and event identifiers provide an additional convergence layer for retries and duplicate serverless invocations.
+A per-instance commit barrier prevents concurrent reads from observing mutations before their immutable events are durable. If an upload fails, the disposable cache is rebuilt from Drive before it is served again. Partially uploaded batches remain safe because completed events are immutable and retries converge by deterministic event IDs.
+
+Deterministic memory and event identifiers provide an additional convergence layer for retries, document ingestion, duplicate cron delivery, and duplicate serverless invocations.
 
 ## Data minimization
 

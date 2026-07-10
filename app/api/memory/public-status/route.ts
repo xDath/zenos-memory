@@ -5,7 +5,7 @@ export async function GET() {
   return Response.json({
     success: true,
     service: 'Zenos Memory',
-    version: '2.0.0',
+    version: '2.1.0',
     status: 'operational',
     product: 'serverless, user-owned context continuity for AI agents',
     architecture: {
@@ -21,7 +21,7 @@ export async function GET() {
       writes: 'serialized per namespace through Drive CAS leases',
       deduplication: 'deterministic memory and idempotent event identifiers',
       recovery: 'latest verified snapshot plus ordered delta events',
-      corruption_policy: 'skip invalid snapshot/event payloads and retain verified history',
+      corruption_policy: 'skip invalid snapshots; fail closed on invalid delta events',
     },
     security: {
       authentication: 'short-lived scoped bearer tokens issued through body-bound anti-replay HMAC exchange',

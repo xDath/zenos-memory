@@ -172,34 +172,70 @@ export class GoogleDriveMemoryStore {
     for (const [key, value] of Object.entries(properties)) {
       clauses.push(`appProperties has { key='${escapeDriveQuery(key)}' and value='${escapeDriveQuery(value)}' }`);
     }
-    const response = await this.drive.files.list({
-      supportsAllDrives: true,
-      includeItemsFromAllDrives: true,
-      q: clauses.join(' and '),
-      fields: 'files(id,name,mimeType,createdTime,modifiedTime,appProperties)',
-      orderBy: 'createdTime asc',
-      pageSize: 100,
-    });
-    return response.data.files || [];
+    const files: drive_v3.Schema$File[] = [];
+    let pageToken: string | undefined;
+    do {
+      const response = await this.drive.files.list({
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true,
+        q: clauses.join(' and '),
+        fields: 'nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,appProperties)',
+        orderBy: 'createdTime asc',
+        pageSize: 1000,
+        pageToken,
+      });
+      files.push(...(response.data.files || []));
+      pageToken = response.data.nextPageToken || undefined;
+    } while (pageToken);
+    return files;
   }
 
   private async ensureFolder(parentId: string, name: string): Promise<string> {
     const key = `${parentId}:${name}`;
     const cached = this.folderIds.get(key);
     if (cached) return cached;
-    const existing = (await this.findChildren(parentId, name, FOLDER_MIME))[0]?.id;
+    const canonical = (files: drive_v3.Schema$File[]) => files
+      .filter(file => Boolean(file.id))
+      .sort((left, right) => {
+        const created = String(left.createdTime || '').localeCompare(String(right.createdTime || ''));
+        return created || String(left.id).localeCompare(String(right.id));
+      })[0]?.id;
+    const existing = canonical(await this.listChildren(parentId, {
+      name,
+      mimeType: FOLDER_MIME,
+      orderBy: 'createdTime asc',
+    }));
     if (existing) {
       this.folderIds.set(key, existing);
       return existing;
     }
+
     const response = await this.drive.files.create({
       supportsAllDrives: true,
       requestBody: { name, parents: [parentId], mimeType: FOLDER_MIME },
-      fields: 'id',
+      fields: 'id,createdTime',
     });
-    if (!response.data.id) throw new StorageError(`Drive did not return an id for folder ${name}`);
-    this.folderIds.set(key, response.data.id);
-    return response.data.id;
+    const createdId = response.data.id;
+    if (!createdId) throw new StorageError(`Drive did not return an id for folder ${name}`);
+
+    // Folder creation has no uniqueness constraint. Concurrent cold starts may
+    // both create the same path, so re-list and converge on one deterministic
+    // canonical folder before any child is written.
+    const selected = canonical(await this.listChildren(parentId, {
+      name,
+      mimeType: FOLDER_MIME,
+      orderBy: 'createdTime asc',
+    })) || createdId;
+    if (selected !== createdId) {
+      await this.drive.files.update({
+        supportsAllDrives: true,
+        fileId: createdId,
+        requestBody: { trashed: true },
+        fields: 'id',
+      }).catch(() => undefined);
+    }
+    this.folderIds.set(key, selected);
+    return selected;
   }
 
   private async createJsonFile(
@@ -218,6 +254,43 @@ export class GoogleDriveMemoryStore {
     });
     if (!response.data.id) throw new StorageError(`Drive did not return an id for file ${name}`);
     return response.data.id;
+  }
+
+  private async createOrReuseJsonFile(
+    parentId: string,
+    name: string,
+    payload: unknown,
+    identity: Record<string, string>,
+    sanitizePayload = true,
+  ): Promise<string> {
+    const matchesIdentity = (file: drive_v3.Schema$File) => Object.entries(identity)
+      .every(([key, value]) => file.appProperties?.[key] === value);
+    const canonical = (files: drive_v3.Schema$File[]) => files
+      .filter(file => Boolean(file.id) && matchesIdentity(file))
+      .sort((left, right) => {
+        const created = String(left.createdTime || '').localeCompare(String(right.createdTime || ''));
+        return created || String(left.id).localeCompare(String(right.id));
+      })[0]?.id;
+    const existing = canonical(await this.listChildren(parentId, {
+      mimeType: JSON_MIME,
+      orderBy: 'createdTime asc',
+    }));
+    if (existing) return existing;
+
+    const createdId = await this.createJsonFile(parentId, name, payload, identity, sanitizePayload);
+    const selected = canonical(await this.listChildren(parentId, {
+      mimeType: JSON_MIME,
+      orderBy: 'createdTime asc',
+    })) || createdId;
+    if (selected !== createdId) {
+      await this.drive.files.update({
+        supportsAllDrives: true,
+        fileId: createdId,
+        requestBody: { trashed: true },
+        fields: 'id',
+      }).catch(() => undefined);
+    }
+    return selected;
   }
 
   private async readJsonById(fileId: string): Promise<unknown> {
@@ -366,6 +439,26 @@ export class GoogleDriveMemoryStore {
     return { file_id: fileId, cursor: cloudCursor(event.occurred_at, event.event_id), deduplicated: false };
   }
 
+  async appendCloudEvents(
+    events: CloudMemoryEvent[],
+    concurrency = 4,
+  ): Promise<Array<{ file_id: string; cursor: string; deduplicated: boolean }>> {
+    const boundedConcurrency = Math.max(1, Math.min(8, concurrency));
+    const outcomes = await mapLimit(events, boundedConcurrency, async event => {
+      try {
+        return { ok: true as const, value: await this.appendCloudEvent(event) };
+      } catch (error) {
+        return { ok: false as const, error };
+      }
+    });
+    const failure = outcomes.find(outcome => !outcome.ok);
+    if (failure && !failure.ok) throw failure.error;
+    return outcomes.map(outcome => {
+      if (!outcome.ok) throw outcome.error;
+      return outcome.value;
+    });
+  }
+
   private async latestCloudSnapshot(namespace: string): Promise<CloudSnapshot | null> {
     const { snapshotsRoot } = await this.cloudNamespaceFolders(namespace);
     const files = await this.listChildren(snapshotsRoot, { mimeType: JSON_MIME, orderBy: 'createdTime desc', pageSize: 100 });
@@ -476,19 +569,20 @@ export class GoogleDriveMemoryStore {
     const { snapshotsRoot, indexesRoot } = await this.cloudNamespaceFolders(snapshot.namespace);
     const stamp = snapshot.generated_at.replace(/[:.]/g, '-');
     const snapshotName = `${stamp}-${snapshot.snapshot_id}.json`;
-    const snapshotFileId = await this.createJsonFile(snapshotsRoot, snapshotName, snapshot, {
+    const snapshotFileId = await this.createOrReuseJsonFile(snapshotsRoot, snapshotName, snapshot, {
       format: snapshot.format,
       namespace: snapshot.namespace,
       snapshotId: snapshot.snapshot_id,
       throughCursor: snapshot.through_cursor || '',
+      checksum: snapshot.checksum,
     }, false);
     const [searchIndexFileId, graphIndexFileId] = await Promise.all([
-      this.createJsonFile(indexesRoot, `${stamp}-${snapshot.snapshot_id}.search.json`, this.buildSearchIndex(stateInput), {
+      this.createOrReuseJsonFile(indexesRoot, `${stamp}-${snapshot.snapshot_id}.search.json`, this.buildSearchIndex(stateInput), {
         format: 'zenos-memory-search-index-v1',
         namespace: snapshot.namespace,
         snapshotId: snapshot.snapshot_id,
       }, false),
-      this.createJsonFile(indexesRoot, `${stamp}-${snapshot.snapshot_id}.graph.json`, this.buildGraphIndex(stateInput), {
+      this.createOrReuseJsonFile(indexesRoot, `${stamp}-${snapshot.snapshot_id}.graph.json`, this.buildGraphIndex(stateInput), {
         format: 'zenos-memory-graph-index-v1',
         namespace: snapshot.namespace,
         snapshotId: snapshot.snapshot_id,
@@ -528,9 +622,20 @@ export class GoogleDriveMemoryStore {
   private async coordinationFile(namespace: string, resource: string): Promise<string> {
     const { coordinationRoot } = await this.cloudNamespaceFolders(namespace);
     const name = `${safeNamespace(resource)}.json`;
-    const existing = (await this.findChildren(coordinationRoot, name, JSON_MIME))[0]?.id;
+    const selectCanonical = (files: drive_v3.Schema$File[]) => files
+      .filter(file => Boolean(file.id))
+      .sort((left, right) => {
+        const created = String(left.createdTime || '').localeCompare(String(right.createdTime || ''));
+        return created || String(left.id).localeCompare(String(right.id));
+      })[0]?.id;
+    const existing = selectCanonical(await this.listChildren(coordinationRoot, {
+      name,
+      mimeType: JSON_MIME,
+      orderBy: 'createdTime asc',
+    }));
     if (existing) return existing;
-    return this.createJsonFile(coordinationRoot, name, {
+
+    const createdId = await this.createJsonFile(coordinationRoot, name, {
       format: 'zenos-memory-drive-lease-v1',
       namespace,
       resource,
@@ -539,6 +644,20 @@ export class GoogleDriveMemoryStore {
       acquired_at: new Date(0).toISOString(),
       expires_at: new Date(0).toISOString(),
     }, { format: 'zenos-memory-drive-lease-v1', namespace, resource });
+    const selected = selectCanonical(await this.listChildren(coordinationRoot, {
+      name,
+      mimeType: JSON_MIME,
+      orderBy: 'createdTime asc',
+    })) || createdId;
+    if (selected !== createdId) {
+      await this.drive.files.update({
+        supportsAllDrives: true,
+        fileId: createdId,
+        requestBody: { trashed: true },
+        fields: 'id',
+      }).catch(() => undefined);
+    }
+    return selected;
   }
 
   async acquireCloudLease(
@@ -666,18 +785,40 @@ export class GoogleDriveMemoryStore {
   }
 
   async listCloudAudit(namespace: string, limit = 100): Promise<Array<Record<string, unknown>>> {
-    const events = await this.cloudEventsAfter(namespace, null);
-    return events.slice(-Math.max(1, Math.min(limit, 1000))).reverse().map(event => ({
-      id: event.event_id,
-      occurred_at: event.occurred_at,
-      actor: event.actor,
-      action: event.action,
-      namespace: event.namespace,
-      request_id: event.request_id || null,
-      event_hash: event.checksum,
-      previous_cursor: event.previous_cursor || null,
-      change_count: event.changes.length,
-    }));
+    const boundedLimit = Math.max(1, Math.min(limit, 1000));
+    const { eventsRoot } = await this.cloudNamespaceFolders(namespace);
+    const monthFolders = (await this.listChildren(eventsRoot, {
+      mimeType: FOLDER_MIME,
+      orderBy: 'name desc',
+    })).filter(file => file.id && /^\d{4}-\d{2}$/.test(String(file.name || '')));
+    const selected: drive_v3.Schema$File[] = [];
+    for (const month of monthFolders) {
+      const files = (await this.listChildren(String(month.id), {
+        mimeType: JSON_MIME,
+        orderBy: 'name desc',
+      })).filter(file => file.id && file.appProperties?.format === 'zenos-memory-event-v1');
+      selected.push(...files.slice(0, boundedLimit - selected.length));
+      if (selected.length >= boundedLimit) break;
+    }
+    const events = await mapLimit(selected, 8, async file => {
+      return validateCloudEvent(await this.readJsonById(String(file.id)));
+    });
+    return events
+      .sort((left, right) => compareCloudCursor(
+        cloudCursor(right.occurred_at, right.event_id),
+        cloudCursor(left.occurred_at, left.event_id),
+      ))
+      .map(event => ({
+        id: event.event_id,
+        occurred_at: event.occurred_at,
+        actor: event.actor,
+        action: event.action,
+        namespace: event.namespace,
+        request_id: event.request_id || null,
+        event_hash: event.checksum,
+        previous_cursor: event.previous_cursor || null,
+        change_count: event.changes.length,
+      }));
   }
 
   async claimCloudNonce(nonce: string, ttlMs = 2 * 60_000): Promise<boolean> {
@@ -712,6 +853,144 @@ export class GoogleDriveMemoryStore {
     throw new ConflictError('Unable to claim authentication nonce after concurrent updates');
   }
 
+  async trashCloudNamespace(namespace: string): Promise<{ trashed_roots: number }> {
+    const normalized = safeNamespace(namespace);
+    const rootFolderId = await this.resolveRootFolderId();
+    const targets: string[] = [];
+
+    const cloudRoot = (await this.findChildren(rootFolderId, CLOUD_ROOT_NAME, FOLDER_MIME))[0]?.id;
+    if (cloudRoot) {
+      const namespacesRoot = (await this.findChildren(cloudRoot, 'namespaces', FOLDER_MIME))[0]?.id;
+      if (namespacesRoot) {
+        const namespaceRoots = await this.findChildren(namespacesRoot, normalized, FOLDER_MIME);
+        targets.push(...namespaceRoots.map(file => String(file.id || '')).filter(Boolean));
+      }
+    }
+
+    const backupsRoot = (await this.findChildren(rootFolderId, 'zenos-memory-backups', FOLDER_MIME))[0]?.id;
+    if (backupsRoot) {
+      const backupNamespaces = await this.findChildren(backupsRoot, normalized, FOLDER_MIME);
+      targets.push(...backupNamespaces.map(file => String(file.id || '')).filter(Boolean));
+    }
+
+    await mapLimit([...new Set(targets)], 4, async fileId => {
+      await this.drive.files.update({
+        supportsAllDrives: true,
+        fileId,
+        requestBody: { trashed: true },
+        fields: 'id',
+      });
+    });
+    return { trashed_roots: new Set(targets).size };
+  }
+
+  async pruneCloudTestNamespaces(olderThanMs = 24 * 60 * 60 * 1000): Promise<{ trashed_test_namespaces: number }> {
+    const cutoff = Date.now() - Math.max(60 * 60 * 1000, olderThanMs);
+    const testPattern = /^(?:cloud-smoke|concurrency-smoke|smoke)-\d{10,}$/;
+    const rootFolderId = await this.resolveRootFolderId();
+    const names = new Set<string>();
+
+    const cloudRoot = (await this.findChildren(rootFolderId, CLOUD_ROOT_NAME, FOLDER_MIME))[0]?.id;
+    if (cloudRoot) {
+      const namespacesRoot = (await this.findChildren(cloudRoot, 'namespaces', FOLDER_MIME))[0]?.id;
+      if (namespacesRoot) {
+        const folders = await this.listChildren(namespacesRoot, { mimeType: FOLDER_MIME, orderBy: 'createdTime asc' });
+        for (const folder of folders) {
+          if (folder.name && testPattern.test(folder.name) && new Date(folder.createdTime || 0).getTime() <= cutoff) {
+            names.add(folder.name);
+          }
+        }
+      }
+    }
+
+    const backupsRoot = (await this.findChildren(rootFolderId, 'zenos-memory-backups', FOLDER_MIME))[0]?.id;
+    if (backupsRoot) {
+      const folders = await this.listChildren(backupsRoot, { mimeType: FOLDER_MIME, orderBy: 'createdTime asc' });
+      for (const folder of folders) {
+        if (folder.name && testPattern.test(folder.name) && new Date(folder.createdTime || 0).getTime() <= cutoff) {
+          names.add(folder.name);
+        }
+      }
+    }
+
+    let trashed = 0;
+    for (const name of names) {
+      const result = await this.trashCloudNamespace(name);
+      if (result.trashed_roots > 0) trashed += 1;
+    }
+    return { trashed_test_namespaces: trashed };
+  }
+
+  async pruneCloudArtifacts(
+    namespace: string,
+    options: { snapshotRetention?: number; backupDayRetention?: number; testNamespaceRetentionHours?: number } = {},
+  ): Promise<{
+    retained_snapshots: number;
+    trashed_snapshots: number;
+    trashed_indexes: number;
+    retained_backup_days: number;
+    trashed_backup_days: number;
+    trashed_test_namespaces: number;
+  }> {
+    const snapshotRetention = Math.max(2, Math.min(120, options.snapshotRetention || 14));
+    const backupDayRetention = Math.max(2, Math.min(120, options.backupDayRetention || 14));
+    const { snapshotsRoot, indexesRoot } = await this.cloudNamespaceFolders(namespace);
+    const snapshots = (await this.listChildren(snapshotsRoot, {
+      mimeType: JSON_MIME,
+      orderBy: 'createdTime desc',
+    })).filter(file => file.appProperties?.format === 'zenos-memory-cloud-snapshot-v1' && file.id);
+    const obsoleteSnapshots = snapshots.slice(snapshotRetention);
+    const obsoleteSnapshotIds = new Set(
+      obsoleteSnapshots.map(file => file.appProperties?.snapshotId).filter((value): value is string => Boolean(value)),
+    );
+    const indexes = (await this.listChildren(indexesRoot, {
+      mimeType: JSON_MIME,
+      orderBy: 'createdTime desc',
+    })).filter(file => file.id && file.appProperties?.snapshotId && obsoleteSnapshotIds.has(file.appProperties.snapshotId));
+
+    const trash = async (files: drive_v3.Schema$File[]) => {
+      await mapLimit(files, 6, async file => {
+        await this.drive.files.update({
+          supportsAllDrives: true,
+          fileId: String(file.id),
+          requestBody: { trashed: true },
+          fields: 'id',
+        });
+      });
+    };
+    await trash(indexes);
+    await trash(obsoleteSnapshots);
+
+    const rootFolderId = await this.resolveRootFolderId();
+    const backupsRoot = (await this.findChildren(rootFolderId, 'zenos-memory-backups', FOLDER_MIME))[0]?.id;
+    let backupDays: drive_v3.Schema$File[] = [];
+    if (backupsRoot) {
+      const namespaceRoot = (await this.findChildren(backupsRoot, safeNamespace(namespace), FOLDER_MIME))[0]?.id;
+      if (namespaceRoot) {
+        backupDays = (await this.listChildren(namespaceRoot, {
+          mimeType: FOLDER_MIME,
+          orderBy: 'name desc',
+        })).filter(file => file.id && /^\d{4}-\d{2}-\d{2}$/.test(String(file.name || '')));
+      }
+    }
+    const obsoleteBackupDays = backupDays.slice(backupDayRetention);
+    await trash(obsoleteBackupDays);
+    const testCleanup = process.env.ZENOS_MEMORY_PRUNE_TEST_NAMESPACES === 'true'
+      ? await this.pruneCloudTestNamespaces(
+          Math.max(1, options.testNamespaceRetentionHours || 24) * 60 * 60 * 1000,
+        )
+      : { trashed_test_namespaces: 0 };
+
+    return {
+      retained_snapshots: Math.min(snapshotRetention, snapshots.length),
+      trashed_snapshots: obsoleteSnapshots.length,
+      trashed_indexes: indexes.length,
+      retained_backup_days: Math.min(backupDayRetention, backupDays.length),
+      trashed_backup_days: obsoleteBackupDays.length,
+      trashed_test_namespaces: testCleanup.trashed_test_namespaces,
+    };
+  }
+
   async createSnapshot(snapshot: DriveSnapshot): Promise<{ file_id: string; manifest_id: string; checksum: string }> {
     const rootFolderId = await this.resolveRootFolderId();
     const backupsRoot = await this.ensureFolder(rootFolderId, 'zenos-memory-backups');
@@ -720,7 +999,7 @@ export class GoogleDriveMemoryStore {
     const dayRoot = await this.ensureFolder(namespaceRoot, snapshot.generated_at.slice(0, 10));
     const stamp = snapshot.generated_at.replace(/[:.]/g, '-');
     const base = `snapshot-${namespace}-${stamp}`;
-    const fileId = await this.createJsonFile(dayRoot, `${base}.json`, snapshot, {
+    const fileId = await this.createOrReuseJsonFile(dayRoot, `${base}.json`, snapshot, {
       format: snapshot.format,
       namespace,
       checksum: snapshot.checksum,
@@ -734,9 +1013,11 @@ export class GoogleDriveMemoryStore {
       count: snapshot.memories.length,
       checksum: snapshot.checksum,
     };
-    const manifestId = await this.createJsonFile(dayRoot, `${base}.manifest.json`, manifest, {
+    const manifestId = await this.createOrReuseJsonFile(dayRoot, `${base}.manifest.json`, manifest, {
       format: 'zenos-memory-backup-manifest-v1',
       namespace,
+      checksum: snapshot.checksum,
+      snapshotFileId: fileId,
     });
     return { file_id: fileId, manifest_id: manifestId, checksum: snapshot.checksum };
   }

@@ -1,5 +1,6 @@
 import { rm } from 'node:fs/promises';
 import path from 'node:path';
+import { createDriveStore } from '../app/lib/drive';
 import { loadZenosRuntimeEnv } from './runtime-env.mjs';
 
 loadZenosRuntimeEnv(path.resolve(import.meta.dirname, '..'));
@@ -47,6 +48,22 @@ try {
 
   const backup = await retryEngine.backupMemories(namespace);
   if (!backup.verified) throw new Error('Cloud snapshot verification failed');
+  const duplicateBackup = await retryEngine.backupMemories(namespace);
+  if (!duplicateBackup.verified) throw new Error('Repeated cloud snapshot verification failed');
+  if (
+    'snapshot_file_id' in backup
+    && 'snapshot_file_id' in duplicateBackup
+    && backup.snapshot_file_id !== duplicateBackup.snapshot_file_id
+  ) {
+    throw new Error('Duplicate snapshot delivery created a second cloud snapshot file');
+  }
+  if (
+    'portable_backup_file_id' in backup
+    && 'portable_backup_file_id' in duplicateBackup
+    && backup.portable_backup_file_id !== duplicateBackup.portable_backup_file_id
+  ) {
+    throw new Error('Duplicate snapshot delivery created a second portable backup file');
+  }
 
   await cleanCache();
   const coldEngine = getMemoryEngine();
@@ -71,6 +88,7 @@ try {
       'cross-instance-idempotency',
       'append-only-update',
       'immutable-snapshot',
+      'content-addressed-backup-deduplication',
       'search-index',
       'graph-index',
       'cold-start-materialization',
@@ -79,4 +97,5 @@ try {
   }, null, 2)}\n`);
 } finally {
   await cleanCache();
+  await createDriveStore().trashCloudNamespace(namespace).catch(() => ({ trashed_roots: 0 }));
 }

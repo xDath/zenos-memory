@@ -74,13 +74,14 @@ async function callModel<T>(
   model: string,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   schema: z.ZodType<T, z.ZodTypeDef, unknown>,
+  timeoutMs: number,
 ): Promise<MemoryLLMResult<T>> {
   const baseUrl = (process.env.MEMORY_LLM_BASE_URL || '').replace(/\/$/, '');
   const apiKey = process.env.MEMORY_LLM_API_KEY || '';
   if (!baseUrl || !apiKey) return { ok: false, model, error: 'Memory LLM is not configured' };
 
   const started = Date.now();
-  const timeoutMs = Math.max(5_000, Math.min(Number(process.env.MEMORY_LLM_TIMEOUT_MS || 45_000), 120_000));
+  const boundedTimeoutMs = Math.max(3_000, Math.min(timeoutMs, 50_000));
   try {
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
@@ -96,7 +97,7 @@ async function callModel<T>(
         stream: false,
         response_format: { type: 'json_object' },
       }),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: AbortSignal.timeout(boundedTimeoutMs),
       cache: 'no-store',
     });
 
@@ -155,9 +156,16 @@ async function callWithFallback<T>(
   const fallback = process.env.MEMORY_LLM_FALLBACK_MODEL || '';
   if (!primary) return { ok: false, error: 'MEMORY_LLM_MODEL is not configured' };
 
-  const result = await callModel(primary, messages, schema);
+  const totalBudgetMs = Math.max(10_000, Math.min(Number(process.env.MEMORY_LLM_TOTAL_BUDGET_MS || 48_000), 52_000));
+  const attemptBudgetMs = Math.max(5_000, Math.min(Number(process.env.MEMORY_LLM_TIMEOUT_MS || 22_000), 25_000));
+  const started = Date.now();
+  const result = await callModel(primary, messages, schema, Math.min(attemptBudgetMs, totalBudgetMs));
   if (result.ok || !fallback || fallback === primary) return result;
-  return callModel(fallback, messages, schema);
+  const remainingMs = totalBudgetMs - (Date.now() - started);
+  if (remainingMs < 3_000) {
+    return { ...result, error: `${result.error || 'Primary model failed'}; fallback skipped because the function budget was exhausted` };
+  }
+  return callModel(fallback, messages, schema, Math.min(attemptBudgetMs, remainingMs));
 }
 
 export async function extractWithLLM(text: string): Promise<MemoryLLMResult<ExtractionOutput>> {

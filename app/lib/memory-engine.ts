@@ -10,6 +10,8 @@ import {
 import {
   buildCloudEvent,
   CloudMemoryChange,
+  CloudMemoryEvent,
+  cloudCursor,
   deterministicEventId,
   deterministicMemoryId,
   MaterializedCloudState,
@@ -73,7 +75,15 @@ export class MemoryEngine {
   private readonly cloudRefreshMs: number;
   private readonly namespaceState = new Map<string, { revision: string; loadedAt: number; cursor: string | null; eventCount: number }>();
   private readonly namespaceRefreshes = new Map<string, Promise<void>>();
-  private readonly writeContext = new AsyncLocalStorage<{ namespace: string; lease: DriveLease }>();
+  private readonly namespaceWriteGates = new Map<string, Promise<void>>();
+  private readonly writeContext = new AsyncLocalStorage<{
+    namespace: string;
+    lease: DriveLease;
+    deferred?: {
+      events: CloudMemoryEvent[];
+      idempotencyKeys: Set<string>;
+    };
+  }>();
   private readyPromise: Promise<void> | null = null;
 
   constructor(options: { store?: SqliteMemoryStore; driveBackup?: GoogleDriveMemoryStore | null } = {}) {
@@ -89,6 +99,10 @@ export class MemoryEngine {
   private async ensureReady(namespace = process.env.ZENOS_MEMORY_DEFAULT_NAMESPACE || 'zenos', force = false): Promise<void> {
     const normalized = normalizeNamespace(namespace);
     if (this.cloudMode) {
+      const activeWrite = this.namespaceWriteGates.get(normalized);
+      const ownWrite = this.writeContext.getStore()?.namespace === normalized;
+      if (ownWrite) return;
+      if (activeWrite) await activeWrite;
       await this.refreshCloudNamespace(normalized, force);
       return;
     }
@@ -136,7 +150,7 @@ export class MemoryEngine {
         if (legacy.length) state = await this.driveBackup!.initializeCloudNamespace(normalized, legacy);
       }
       const known = this.namespaceState.get(normalized);
-      if (!known || known.revision !== state.revision) {
+      if (force || !known || known.revision !== state.revision) {
         this.store.replaceNamespace(normalized, state.memories);
       }
       this.namespaceState.set(normalized, {
@@ -150,7 +164,12 @@ export class MemoryEngine {
     return refresh;
   }
 
-  private async withCloudWrite<T>(namespace: string, action: string, operation: () => Promise<T>): Promise<T> {
+  private async withCloudWrite<T>(
+    namespace: string,
+    action: string,
+    operation: () => Promise<T>,
+    options: { deferEvents?: boolean } = {},
+  ): Promise<T> {
     const normalized = normalizeNamespace(namespace);
     if (!this.cloudMode || !this.driveBackup) {
       await this.ensureReady(normalized);
@@ -158,19 +177,52 @@ export class MemoryEngine {
     }
     const active = this.writeContext.getStore();
     if (active?.namespace === normalized) return operation();
+    const pendingLocalWrite = this.namespaceWriteGates.get(normalized);
+    if (pendingLocalWrite) await pendingLocalWrite;
 
-    const owner = `${process.env.VERCEL_DEPLOYMENT_ID || process.env.VERCEL_REGION || 'node'}:${process.pid}:${randomUUID()}`;
+    const owner = `${process.env.VERCEL_DEPLOYMENT_ID || process.env.VERCEL_REGION || 'node'}:${process.pid}:${action}:${randomUUID()}`;
     const lease = await this.driveBackup.acquireCloudLease(
       normalized,
       'namespace-write',
       owner,
-      Math.max(10_000, Number(process.env.ZENOS_MEMORY_WRITE_LEASE_MS || 25_000)),
+      Math.max(30_000, Math.min(5 * 60_000, Number(process.env.ZENOS_MEMORY_WRITE_LEASE_MS || 90_000))),
       Math.max(5_000, Number(process.env.ZENOS_MEMORY_WRITE_WAIT_MS || 15_000)),
     );
+    const deferred = options.deferEvents
+      ? { events: [] as CloudMemoryEvent[], idempotencyKeys: new Set<string>() }
+      : undefined;
+    let releaseWriteGate!: () => void;
+    const writeGate = new Promise<void>(resolve => {
+      releaseWriteGate = resolve;
+    });
+    this.namespaceWriteGates.set(normalized, writeGate);
     try {
       await this.refreshCloudNamespace(normalized, true);
-      return await this.writeContext.run({ namespace: normalized, lease }, operation);
+      const result = await this.writeContext.run({ namespace: normalized, lease, deferred }, operation);
+      if (deferred?.events.length) {
+        await this.driveBackup.appendCloudEvents(
+          deferred.events,
+          Number(process.env.ZENOS_MEMORY_EVENT_UPLOAD_CONCURRENCY || 4),
+        );
+        await this.refreshCloudNamespace(normalized, true);
+      }
+      return result;
+    } catch (error) {
+      for (const key of deferred?.idempotencyKeys || []) {
+        this.store.deleteIdempotent(key, 'remember');
+      }
+      // A cloud write mutates only the ephemeral materialized view before its
+      // immutable Drive event is uploaded. Re-materialize on failure so a warm
+      // function can never serve an uncommitted (phantom) mutation.
+      await this.refreshCloudNamespace(normalized, true).catch(() => {
+        this.namespaceState.delete(normalized);
+      });
+      throw error;
     } finally {
+      if (this.namespaceWriteGates.get(normalized) === writeGate) {
+        this.namespaceWriteGates.delete(normalized);
+      }
+      releaseWriteGate();
       await this.driveBackup.releaseCloudLease(lease).catch(() => false);
     }
   }
@@ -186,6 +238,12 @@ export class MemoryEngine {
     if (!this.cloudMode || !this.driveBackup || !input.changes.length) return;
     const normalized = normalizeNamespace(input.namespace);
     const state = this.namespaceState.get(normalized);
+    const active = this.writeContext.getStore();
+    const deferred = active?.namespace === normalized ? active.deferred : undefined;
+    const previousEvent = deferred?.events.at(-1);
+    const previousCursor = previousEvent
+      ? cloudCursor(previousEvent.occurred_at, previousEvent.event_id)
+      : state?.cursor;
     const event = buildCloudEvent({
       namespace: normalized,
       action: input.action,
@@ -193,8 +251,15 @@ export class MemoryEngine {
       requestId: input.requestId,
       idempotencyKey: input.idempotencyKey,
       changes: input.changes,
-      previousCursor: state?.cursor,
+      previousCursor,
     });
+
+    if (deferred) {
+      deferred.events.push(event);
+      if (input.idempotencyKey) deferred.idempotencyKeys.add(input.idempotencyKey);
+      return;
+    }
+
     const uploaded = await this.driveBackup.appendCloudEvent(event);
     const nextState: MaterializedCloudState = {
       namespace: normalized,
@@ -461,9 +526,28 @@ export class MemoryEngine {
 
   async rememberBatch(requests: RememberRequest[]): Promise<Memory[]> {
     if (!requests.length) return [];
-    if (requests.length > 250) throw new ConflictError('Batch exceeds 250 memories');
-    const results: Memory[] = [];
-    for (const request of requests) results.push(await this.remember(request));
+    const maxBatch = this.cloudMode ? 100 : 250;
+    if (requests.length > maxBatch) throw new ConflictError(`Batch exceeds ${maxBatch} memories`);
+    const parsed = requests.map((request, index) => ({
+      index,
+      request: RememberRequestSchema.parse(request),
+    }));
+    const groups = new Map<string, typeof parsed>();
+    for (const item of parsed) {
+      const namespace = normalizeNamespace(item.request.namespace);
+      const group = groups.get(namespace) || [];
+      group.push(item);
+      groups.set(namespace, group);
+    }
+
+    const results = new Array<Memory>(requests.length);
+    for (const [namespace, group] of groups) {
+      await this.withCloudWrite(namespace, 'memory_batch_created', async () => {
+        for (const item of group) {
+          results[item.index] = await this.rememberUnlocked(item.request);
+        }
+      }, { deferEvents: true });
+    }
     return results;
   }
 
@@ -532,7 +616,10 @@ export class MemoryEngine {
       }))
       .filter(memory => parsed.include_low_quality || (memory.quality || 0) >= 0.25 || query === '');
 
-    this.store.touch(ranked.map(memory => memory.id), namespace);
+    // Access counters are intentionally not mutated in cloud mode. Updating
+    // only an instance-local cache would make snapshots depend on which warm
+    // Vercel instance happened to serve the reads.
+    if (!this.cloudMode) this.store.touch(ranked.map(memory => memory.id), namespace);
     return ranked;
   }
 
@@ -804,19 +891,52 @@ export class MemoryEngine {
 
   async applyTemporalDecay(namespace?: string): Promise<number> {
     const normalized = normalizeNamespace(namespace || process.env.ZENOS_MEMORY_DEFAULT_NAMESPACE || 'zenos');
-    await this.ensureReady(normalized);
-    const memories = this.store.list({ namespace: normalized, limit: 10_000, includeArchived: false });
-    let updatedCount = 0;
-    for (const memory of memories) {
-      if (SECRET_TYPES.has(memory.type)) continue;
-      const ageDays = Math.max(0, (Date.now() - new Date(memory.updated_at).getTime()) / 86_400_000);
-      if (ageDays < 90 || memory.metadata.importance >= 9) continue;
-      const confidence = Math.max(0.2, (memory.metadata.confidence || 0.8) * Math.max(0.7, 1 - ageDays / 1095));
-      if (Math.abs(confidence - memory.metadata.confidence) < 0.01) continue;
-      await this.edit(memory.id, { metadata: { confidence } }, memory.namespace, memory.metadata.version);
-      updatedCount += 1;
-    }
-    return updatedCount;
+    return this.withCloudWrite(normalized, 'temporal_decay_applied', async () => {
+      await this.ensureReady(normalized);
+      const memories = this.store.list({ namespace: normalized, limit: 10_000, includeArchived: false });
+      const now = new Date().toISOString();
+      const decayDay = now.slice(0, 10);
+      const updates: Array<{ previousVersion: number; memory: Memory }> = [];
+
+      for (const memory of memories) {
+        if (SECRET_TYPES.has(memory.type)) continue;
+        if (String(memory.metadata.last_decay_at || '').slice(0, 10) === decayDay) continue;
+        const ageDays = Math.max(0, (Date.now() - new Date(memory.updated_at).getTime()) / 86_400_000);
+        if (ageDays < 90 || memory.metadata.importance >= 9) continue;
+        const confidence = Math.max(0.2, (memory.metadata.confidence || 0.8) * Math.max(0.7, 1 - ageDays / 1095));
+        if (Math.abs(confidence - memory.metadata.confidence) < 0.01) continue;
+        const previousVersion = memory.metadata.version || 1;
+        updates.push({
+          previousVersion,
+          memory: MemorySchema.parse({
+            ...memory,
+            metadata: {
+              ...memory.metadata,
+              confidence,
+              last_decay_at: now,
+              version: previousVersion + 1,
+            },
+            updated_at: now,
+          }),
+        });
+      }
+
+      if (!updates.length) return 0;
+      this.store.transaction(() => {
+        for (const update of updates) this.store.update(update.memory, update.previousVersion);
+        this.store.appendAudit({
+          action: 'temporal_decay_applied',
+          namespace: normalized,
+          details: { updated: updates.length },
+        });
+      });
+      await this.persistCloudChanges({
+        namespace: normalized,
+        action: 'temporal_decay_applied',
+        changes: updates.map(update => ({ operation: 'upsert' as const, memory: update.memory })),
+      });
+      return updates.length;
+    });
   }
 
   async dailyIntelligenceReport(namespace = 'zenos') {
@@ -1070,6 +1190,23 @@ export class MemoryEngine {
       details: { destination: 'local', count: snapshot.memories.length, checksum: snapshot.checksum },
     });
     return { destination: 'local', verified: true, count: snapshot.memories.length, path: target, checksum: snapshot.checksum };
+  }
+
+  async pruneCloudArtifacts(namespace = process.env.ZENOS_MEMORY_DEFAULT_NAMESPACE || 'zenos') {
+    const normalized = normalizeNamespace(namespace);
+    if (!this.cloudMode || !this.driveBackup) {
+      return {
+        skipped: true,
+        reason: 'Drive event mode is not active',
+      };
+    }
+    return this.withCloudWrite(normalized, 'cloud_artifacts_pruned', () => {
+      return this.driveBackup!.pruneCloudArtifacts(normalized, {
+        snapshotRetention: Number(process.env.ZENOS_MEMORY_SNAPSHOT_RETENTION || 14),
+        backupDayRetention: Number(process.env.ZENOS_MEMORY_BACKUP_DAY_RETENTION || 14),
+        testNamespaceRetentionHours: Number(process.env.ZENOS_MEMORY_TEST_NAMESPACE_RETENTION_HOURS || 24),
+      });
+    });
   }
 
   async restoreSnapshot(
