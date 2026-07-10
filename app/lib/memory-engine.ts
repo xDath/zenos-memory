@@ -20,6 +20,7 @@ import { ConflictError, StorageError, ValidationError } from './errors';
 import { rankHybrid } from './hybrid-retrieval';
 import { buildKnowledgeMemories } from './knowledge-ingestion';
 import { buildMutationPlan } from './memory-mutation';
+import { buildMaintenanceReport } from './memory-maintainer';
 import {
   InternalRecallRequestSchema,
   Memory,
@@ -42,6 +43,37 @@ type ScoredMemory = Memory & {
   reason?: string;
   signals?: Record<string, number>;
 };
+
+interface MaintenanceBackupResult {
+  destination: string;
+  verified: boolean;
+  count: number;
+  [key: string]: unknown;
+}
+
+interface MemoryHealthResult {
+  ok: boolean;
+  total: number;
+  unhealthy: number;
+  items: Array<{
+    id: string;
+    quality: number;
+    content: string;
+    updated_at: string;
+    status: Memory['metadata']['status'];
+  }>;
+  storage: ReturnType<SqliteMemoryStore['health']>;
+  recommendations: string[];
+}
+
+interface MaintenanceCycleResult {
+  namespace: string;
+  decayed: number;
+  backup: MaintenanceBackupResult | null;
+  retention: Record<string, unknown> | null;
+  health: MemoryHealthResult;
+  maintenance: ReturnType<typeof buildMaintenanceReport> | null;
+}
 
 export interface MemoryUpdate {
   type?: MemoryType;
@@ -939,6 +971,45 @@ export class MemoryEngine {
     });
   }
 
+  async runMaintenanceCycle(options: {
+    namespace?: string;
+    applyDecay?: boolean;
+    backup?: boolean;
+    prune?: boolean;
+    includeReport?: boolean;
+  } = {}): Promise<MaintenanceCycleResult> {
+    const normalized = normalizeNamespace(
+      options.namespace || process.env.ZENOS_MEMORY_DEFAULT_NAMESPACE || 'zenos',
+    );
+    return this.withCloudWrite(normalized, 'scheduled_maintenance', async () => {
+      const maintenance = options.includeReport
+        ? buildMaintenanceReport(this.store.list({
+            namespace: normalized,
+            limit: 10_000,
+            includeArchived: true,
+          }))
+        : null;
+      const decayed = options.applyDecay === false ? 0 : await this.applyTemporalDecay(normalized);
+      const backup = options.backup === false
+        ? null
+        : await this.backupMemories(normalized) as MaintenanceBackupResult;
+      const [retention, health] = await Promise.all([
+        options.prune === false
+          ? Promise.resolve(null)
+          : this.pruneCloudArtifacts(normalized) as Promise<Record<string, unknown>>,
+        this.memoryHealthCheck(normalized) as Promise<MemoryHealthResult>,
+      ]);
+      return {
+        namespace: normalized,
+        decayed,
+        backup,
+        retention,
+        health,
+        maintenance,
+      };
+    });
+  }
+
   async dailyIntelligenceReport(namespace = 'zenos') {
     const normalized = normalizeNamespace(namespace);
     const memories = await this.list(normalized, 10_000);
@@ -1122,7 +1193,9 @@ export class MemoryEngine {
     const normalized = normalizeNamespace(namespace || process.env.ZENOS_MEMORY_DEFAULT_NAMESPACE || 'zenos');
     if (this.cloudMode && this.driveBackup) {
       return this.withCloudWrite(normalized, 'cloud_snapshot_created', async () => {
-        await this.refreshCloudNamespace(normalized, true);
+        if (this.writeContext.getStore()?.namespace !== normalized) {
+          await this.refreshCloudNamespace(normalized, true);
+        }
         const stateInfo = this.namespaceState.get(normalized);
         const state: MaterializedCloudState = {
           namespace: normalized,
@@ -1132,10 +1205,12 @@ export class MemoryEngine {
           snapshot_id: null,
           revision: stateInfo?.revision || createHash('sha256').update(normalized).digest('hex'),
         };
-        const cloudSnapshot = await this.driveBackup!.createCloudSnapshot(state);
-        if (!cloudSnapshot.verified) throw new StorageError('Cloud snapshot checksum verification failed');
         const portable = this.store.exportSnapshot(normalized);
-        const backup = await this.driveBackup!.createSnapshot(portable);
+        const [cloudSnapshot, backup] = await Promise.all([
+          this.driveBackup!.createCloudSnapshot(state),
+          this.driveBackup!.createSnapshot(portable),
+        ]);
+        if (!cloudSnapshot.verified) throw new StorageError('Cloud snapshot checksum verification failed');
         const backupVerified = await this.driveBackup!.verifySnapshot(backup.file_id, portable.checksum);
         if (!backupVerified) throw new StorageError('Portable Drive backup checksum verification failed');
         this.store.appendAudit({

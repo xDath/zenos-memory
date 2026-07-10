@@ -5,7 +5,6 @@ import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
 import { AppError, errorResponse, requestId } from '../../../lib/errors';
 import { jsonResponse } from '../../../lib/http';
 import { getMemoryEngine } from '../../../lib/memory-engine';
-import { buildMaintenanceReport } from '../../../lib/memory-maintainer';
 
 const SchedulerSchema = z.object({
   namespace: z.string().optional().default('zenos'),
@@ -44,7 +43,7 @@ async function runMaintenance(request: NextRequest, input: unknown) {
   try {
     const parsed = SchedulerSchema.parse(input);
     leaseNamespace = parsed.namespace;
-    const lease = await engine.acquireLease(resource, owner, parsed.namespace, 5 * 60_000);
+    const lease = await engine.acquireLease(resource, owner, parsed.namespace, 90_000);
     if (!lease) {
       throw new AppError('A maintenance run is already active', {
         code: 'MAINTENANCE_ALREADY_RUNNING',
@@ -54,18 +53,13 @@ async function runMaintenance(request: NextRequest, input: unknown) {
     }
     leaseToken = lease.token;
 
-    const memoriesBefore = await engine.recall({
-      query: '',
+    const cycle = await engine.runMaintenanceCycle({
       namespace: parsed.namespace,
-      limit: 5000,
-      include_low_quality: true,
-      include_archived: true,
+      applyDecay: parsed.apply_decay,
+      backup: parsed.backup,
+      prune: parsed.prune,
+      includeReport: parsed.store_report,
     });
-    const before = buildMaintenanceReport(memoriesBefore);
-    const decayed = parsed.apply_decay ? await engine.applyTemporalDecay(parsed.namespace) : 0;
-    const backup = parsed.backup ? await engine.backupMemories(parsed.namespace) : null;
-    const retention = parsed.prune ? await engine.pruneCloudArtifacts(parsed.namespace) : null;
-    const health = await engine.memoryHealthCheck(parsed.namespace);
 
     if (parsed.store_report) {
       const day = new Date().toISOString().slice(0, 10);
@@ -74,11 +68,11 @@ async function runMaintenance(request: NextRequest, input: unknown) {
           kind: 'scheduled-maintenance',
           generated_at: new Date().toISOString(),
           namespace: parsed.namespace,
-          decayed,
-          health,
-          maintenance: before,
-          backup: backup ? { destination: backup.destination, verified: backup.verified } : null,
-          retention,
+          decayed: cycle.decayed,
+          health: cycle.health,
+          maintenance: cycle.maintenance,
+          backup: cycle.backup ? { destination: cycle.backup.destination, verified: cycle.backup.verified } : null,
+          retention: cycle.retention,
         }),
         type: 'insight',
         namespace: parsed.namespace,
@@ -94,12 +88,12 @@ async function runMaintenance(request: NextRequest, input: unknown) {
 
     return jsonResponse({
       success: true,
-      namespace: parsed.namespace,
-      decayed,
-      backup,
-      retention,
-      health,
-      maintenance: before,
+      namespace: cycle.namespace,
+      decayed: cycle.decayed,
+      backup: cycle.backup,
+      retention: cycle.retention,
+      health: cycle.health,
+      maintenance: cycle.maintenance,
       request_id: id,
     }, { requestId: id });
   } catch (error) {

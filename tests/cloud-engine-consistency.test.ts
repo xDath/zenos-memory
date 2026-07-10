@@ -13,8 +13,10 @@ class FakeDriveStore {
   events: CloudMemoryEvent[] = [];
   failNextAppend = false;
   leaseAcquisitions = 0;
+  loadCount = 0;
 
   async loadCloudState(namespace: string) {
+    this.loadCount += 1;
     return materializeCloudState({ namespace, events: this.events });
   }
 
@@ -231,6 +233,26 @@ test('partially uploaded batches recover safely and converge on retry', async ()
     const recovered = await context.engine.list('partial-batch', 10);
     assert.equal(recovered.length, 2);
     assert.equal(context.drive.events.length, 2);
+  } finally {
+    context.close();
+  }
+});
+
+test('maintenance cycle reuses one cloud materialization', async () => {
+  const context = cloudFixture();
+  try {
+    const result = await context.engine.runMaintenanceCycle({
+      namespace: 'maintenance-test',
+      applyDecay: false,
+      backup: false,
+      prune: false,
+      includeReport: false,
+    });
+    assert.equal(result.namespace, 'maintenance-test');
+    assert.equal(result.backup, null);
+    assert.equal(result.retention, null);
+    assert.equal(context.drive.loadCount, 1);
+    assert.equal(context.drive.leaseAcquisitions, 1);
   } finally {
     context.close();
   }
