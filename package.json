@@ -4,7 +4,7 @@
   "private": true,
   "description": "A serverless, user-owned context continuity service powered by Vercel compute and Google Drive events.",
   "engines": {
-    "node": ">=22.13.0"
+    "node": "22.x"
   },
   "scripts": {
     "dev": "next dev -p 3091",

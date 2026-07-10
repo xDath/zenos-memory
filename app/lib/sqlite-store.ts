@@ -77,7 +77,7 @@ function resolveDatabasePath(): string {
 
   return production
     ? '/var/lib/zenos-memory/zenos-memory.sqlite'
-    : path.join(process.cwd(), '.data', 'zenos-memory.sqlite');
+    : path.join(/* turbopackIgnore: true */ process.cwd(), '.data', 'zenos-memory.sqlite');
 }
 
 function jsonParse<T>(value: string | null, fallback: T): T {
