@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { inspect } from 'node:util';
 import {
   authenticateTokenExchange,
   issueEtlaToken,
@@ -12,7 +13,7 @@ import {
   verifyEtlaSignature,
   verifyEtlaToken,
 } from '../app/lib/auth';
-import { SensitiveDataError } from '../app/lib/errors';
+import { publicError, SensitiveDataError, StorageError } from '../app/lib/errors';
 import { MemoryEngine } from '../app/lib/memory-engine';
 import { SqliteMemoryStore } from '../app/lib/sqlite-store';
 
@@ -108,6 +109,28 @@ test('production endpoints reject direct HMAC and require scoped bearer tokens',
   withEnvironment({ NODE_ENV: 'production', ETLA_MASTER_SECRET: secret }, () => {
     assert.equal(validateApiKey(request), false);
   });
+});
+
+test('server error logging never serializes raw causes or secret-bearing details', () => {
+  const marker = 'do-not-log-this-sensitive-marker';
+  const original = console.error;
+  const calls: unknown[][] = [];
+  console.error = (...args: unknown[]) => {
+    calls.push(args);
+  };
+  try {
+    publicError(
+      new StorageError('Drive operation failed', new Error(`authorization=Bearer ${marker}`)),
+      'security-log-test',
+    );
+  } finally {
+    console.error = original;
+  }
+
+  const rendered = inspect(calls, { depth: 10 });
+  assert.equal(rendered.includes(marker), false);
+  assert.equal(rendered.includes('STORAGE_ERROR'), true);
+  assert.equal(rendered.includes('cause_name'), true);
 });
 
 test('raw assigned secrets are rejected while vault references are accepted', async () => {

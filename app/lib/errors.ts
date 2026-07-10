@@ -61,6 +61,35 @@ export function requestId(request?: Request): string {
   return existing && /^[a-zA-Z0-9._:-]{8,128}$/.test(existing) ? existing : randomUUID();
 }
 
+function safeLogMetadata(error: unknown): Record<string, unknown> {
+  if (error instanceof AppError) {
+    return {
+      error_name: error.name,
+      code: error.code,
+      status: error.status,
+      message: error.message,
+      cause_name: error.cause instanceof Error ? error.cause.name : undefined,
+    };
+  }
+  if (error instanceof ZodError) {
+    return {
+      error_name: error.name,
+      code: 'VALIDATION_ERROR',
+      issue_count: error.issues.length,
+    };
+  }
+  if (error instanceof Error) {
+    return {
+      error_name: error.name,
+      code: 'UNEXPECTED_ERROR',
+    };
+  }
+  return {
+    error_name: typeof error,
+    code: 'UNEXPECTED_ERROR',
+  };
+}
+
 export function publicError(error: unknown, id: string = randomUUID()) {
   const appError = error instanceof AppError
     ? error
@@ -77,12 +106,14 @@ export function publicError(error: unknown, id: string = randomUUID()) {
         : new AppError('Unexpected server error', { cause: error });
 
   if (!(error instanceof AppError)) {
-    console.error('[ZenosMemory] Unhandled error', { request_id: id, error });
+    console.error('[ZenosMemory] Unhandled error', {
+      request_id: id,
+      ...safeLogMetadata(error),
+    });
   } else if (appError.status >= 500) {
     console.error('[ZenosMemory] Server error', {
       request_id: id,
-      code: appError.code,
-      error: appError,
+      ...safeLogMetadata(appError),
     });
   }
 

@@ -1023,12 +1023,23 @@ export class GoogleDriveMemoryStore {
   }
 
   async verifySnapshot(fileId: string, expectedChecksum: string): Promise<boolean> {
-    const raw = await this.readJsonById(fileId);
-    if (!raw || typeof raw !== 'object') return false;
-    const snapshot = raw as Partial<DriveSnapshot>;
-    if (!Array.isArray(snapshot.memories)) return false;
-    const checksum = createHash('sha256').update(JSON.stringify(snapshot.memories)).digest('hex');
-    return checksum === expectedChecksum && snapshot.checksum === expectedChecksum;
+    const attempts = Math.max(1, Math.min(6, Number(process.env.ZENOS_MEMORY_DRIVE_VERIFY_ATTEMPTS || 4)));
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        const raw = await this.readJsonById(fileId);
+        if (raw && typeof raw === 'object') {
+          const snapshot = raw as Partial<DriveSnapshot>;
+          if (Array.isArray(snapshot.memories)) {
+            const checksum = createHash('sha256').update(JSON.stringify(snapshot.memories)).digest('hex');
+            if (checksum === expectedChecksum && snapshot.checksum === expectedChecksum) return true;
+          }
+        }
+      } catch (error) {
+        if (attempt === attempts - 1) throw error;
+      }
+      if (attempt < attempts - 1) await sleep(250 * (2 ** attempt));
+    }
+    return false;
   }
 
   async readAll(namespace = 'zenos'): Promise<Memory[]> {
