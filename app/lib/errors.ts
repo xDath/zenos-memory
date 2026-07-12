@@ -79,9 +79,24 @@ function safeLogMetadata(error: unknown): Record<string, unknown> {
     };
   }
   if (error instanceof Error) {
+    const candidate = error as Error & {
+      code?: unknown;
+      status?: unknown;
+      response?: { status?: unknown };
+    };
+    const rawStatus = candidate.status ?? candidate.response?.status;
+    const providerStatus = Number.isInteger(rawStatus) && Number(rawStatus) >= 400 && Number(rawStatus) <= 599
+      ? Number(rawStatus)
+      : undefined;
+    const providerCode = (
+      (typeof candidate.code === 'string' || typeof candidate.code === 'number')
+      && /^[A-Z0-9_.:-]{1,48}$/i.test(String(candidate.code))
+    ) ? String(candidate.code) : undefined;
     return {
       error_name: error.name,
       code: 'UNEXPECTED_ERROR',
+      provider_status: providerStatus,
+      provider_code: providerCode,
     };
   }
   return {

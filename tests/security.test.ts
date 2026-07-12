@@ -133,6 +133,26 @@ test('server error logging never serializes raw causes or secret-bearing details
   assert.equal(rendered.includes('cause_name'), true);
 });
 
+test('unexpected provider errors log bounded status metadata without their message', () => {
+  const marker = 'provider-message-secret-marker';
+  const original = console.error;
+  const calls: unknown[][] = [];
+  console.error = (...args: unknown[]) => calls.push(args);
+  try {
+    publicError(Object.assign(new Error(marker), {
+      code: 'E_PROVIDER',
+      response: { status: 403, data: { token: marker } },
+    }), 'provider-log-test');
+  } finally {
+    console.error = original;
+  }
+
+  const rendered = inspect(calls, { depth: 10 });
+  assert.equal(rendered.includes(marker), false);
+  assert.equal(rendered.includes('provider_status: 403'), true);
+  assert.equal(rendered.includes("provider_code: 'E_PROVIDER'"), true);
+});
+
 test('raw assigned secrets are rejected while vault references are accepted', async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'zenos-security-test-'));
   const store = new SqliteMemoryStore(path.join(directory, 'memory.sqlite'));
