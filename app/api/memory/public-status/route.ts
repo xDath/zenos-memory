@@ -5,7 +5,7 @@ export async function GET() {
   return Response.json({
     success: true,
     service: 'Zenos Memory',
-      version: '2.3.0',
+      version: '2.3.1',
     status: 'operational',
     product: 'serverless, user-owned context continuity for AI agents',
     architecture: {

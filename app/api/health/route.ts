@@ -5,7 +5,7 @@ export async function GET() {
   return Response.json({
     status: 'ok',
     service: 'zenos-memory',
-    version: '2.3.0',
+    version: '2.3.1',
     role: 'liveness',
     timestamp: new Date().toISOString(),
   }, {

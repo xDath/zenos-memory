@@ -1,6 +1,6 @@
 {
   "name": "zenos-memory",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "private": true,
   "description": "A serverless, user-owned context continuity service powered by Vercel compute and Google Drive events.",
   "engines": {
@@ -18,6 +18,7 @@
     "check": "npm run typecheck && npm run lint && npm test && npm run test:smoke && npm run build",
     "cli": "node scripts/zenos-memory-cli.mjs",
     "smoke:prod": "node scripts/smoke-production.mjs",
+    "smoke:semantic": "node scripts/smoke-semantic-production.mjs",
     "smoke:cloud": "tsx scripts/smoke-cloud-drive.mts",
     "smoke:concurrency": "tsx scripts/smoke-cloud-concurrency.mts",
     "maintenance": "node scripts/run-maintenance.mjs",

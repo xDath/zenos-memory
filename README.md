@@ -37,9 +37,10 @@ Zenos Memory 2.3 uses a retrieval pipeline that keeps storage correctness indepe
 1. provider-backed dense embeddings are generated during writes and stored with an explicit model-and-dimension vector-space identifier;
 2. queries are embedded in the same vector space, and vectors from different models or dimensions are never compared;
 3. BM25-style sparse relevance, dense similarity, graph proximity, lifecycle state, recency, confidence, and importance are fused with reciprocal-rank fusion;
-4. when no dense provider is available, an optional LLM semantic-expansion stage creates language-neutral concepts and paraphrases before deterministic hashing;
-5. provider outages degrade to a deterministic multilingual character/token embedding without blocking durable writes or recall;
-6. batches use one embedding or semantic-expansion request instead of one request per memory.
+4. when no dense provider is available, an optional LLM semantic-expansion stage creates language-neutral concepts and paraphrases inside one stable, model-independent semantic hash space;
+5. semantic expansion can retry a configured fallback model within one total latency budget, while all-provider failure is explicitly marked degraded instead of silently reported as healthy;
+6. provider outages still fall back to a deterministic multilingual character/token embedding without blocking durable writes or recall;
+7. batches use one embedding or semantic-expansion request instead of one request per memory.
 
 This is a real dense+sparse+graph retrieval path, not a detached embedding demo. The deterministic benchmark remains a contract regression; live quality must additionally be measured with longitudinal datasets and human feedback.
 

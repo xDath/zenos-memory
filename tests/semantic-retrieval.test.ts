@@ -201,8 +201,105 @@ test('LLM semantic expansion provides a shared semantic space when no dense prov
       'Di region mana layanan production di-host?',
     ]);
     assert.equal(results.every(result => result.provider === 'llm-semantic:semantic-expander'), true);
+    assert.equal(results[0].space, 'llm-semantic-hash:v1:384');
     assert.equal(results[0].space, results[1].space);
     assert.deepEqual(results[0].vector, results[1].vector);
+  } finally {
+    global.fetch = originalFetch;
+    for (const key of keys) {
+      if (original[key] === undefined) delete process.env[key];
+      else process.env[key] = original[key];
+    }
+  }
+});
+
+test('semantic expansion retries a fallback model while preserving one stable vector space', async () => {
+  const originalFetch = global.fetch;
+  const keys = [
+    'MEMORY_EMBEDDING_BASE_URL',
+    'MEMORY_EMBEDDING_API_KEY',
+    'MEMORY_EMBEDDING_MODEL',
+    'MEMORY_LLM_BASE_URL',
+    'MEMORY_LLM_API_KEY',
+    'MEMORY_LLM_MODEL',
+    'MEMORY_LLM_FALLBACK_MODEL',
+    'MEMORY_SEMANTIC_EXPANSION_ENABLED',
+    'MEMORY_SEMANTIC_EXPANSION_TIMEOUT_MS',
+    'MEMORY_SEMANTIC_EXPANSION_TOTAL_BUDGET_MS',
+  ] as const;
+  const original = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  delete process.env.MEMORY_EMBEDDING_BASE_URL;
+  delete process.env.MEMORY_EMBEDDING_API_KEY;
+  delete process.env.MEMORY_EMBEDDING_MODEL;
+  process.env.MEMORY_LLM_BASE_URL = 'https://llm.test/v1';
+  process.env.MEMORY_LLM_API_KEY = 'llm-key';
+  process.env.MEMORY_LLM_MODEL = 'semantic-primary';
+  process.env.MEMORY_LLM_FALLBACK_MODEL = 'semantic-fallback';
+  process.env.MEMORY_SEMANTIC_EXPANSION_ENABLED = 'true';
+  process.env.MEMORY_SEMANTIC_EXPANSION_TIMEOUT_MS = '5000';
+  process.env.MEMORY_SEMANTIC_EXPANSION_TOTAL_BUDGET_MS = '12000';
+  const models: string[] = [];
+  global.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body || '{}')) as { model: string };
+    models.push(body.model);
+    if (body.model === 'semantic-primary') return Response.json({ error: { message: 'temporary' } }, { status: 503 });
+    return Response.json({
+      choices: [{
+        message: {
+          content: JSON.stringify({
+            items: [
+              { index: 0, semantic_text: 'rollback recovery emergency archive' },
+              { index: 1, semantic_text: 'rollback recovery emergency archive' },
+            ],
+          }),
+        },
+      }],
+    });
+  };
+
+  try {
+    const results = await getEmbeddings(['rollback guide', 'panduan pemulihan']);
+    assert.deepEqual(models, ['semantic-primary', 'semantic-fallback']);
+    assert.equal(results.every(result => result.provider === 'llm-semantic:semantic-fallback'), true);
+    assert.equal(results.every(result => result.space === 'llm-semantic-hash:v1:384'), true);
+    assert.equal(results.every(result => result.ok), true);
+  } finally {
+    global.fetch = originalFetch;
+    for (const key of keys) {
+      if (original[key] === undefined) delete process.env[key];
+      else process.env[key] = original[key];
+    }
+  }
+});
+
+test('failed semantic expansion is explicit instead of silently reporting a healthy embedding', async () => {
+  const originalFetch = global.fetch;
+  const keys = [
+    'MEMORY_EMBEDDING_BASE_URL',
+    'MEMORY_EMBEDDING_API_KEY',
+    'MEMORY_EMBEDDING_MODEL',
+    'MEMORY_LLM_BASE_URL',
+    'MEMORY_LLM_API_KEY',
+    'MEMORY_LLM_MODEL',
+    'MEMORY_LLM_FALLBACK_MODEL',
+    'MEMORY_SEMANTIC_EXPANSION_ENABLED',
+  ] as const;
+  const original = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  delete process.env.MEMORY_EMBEDDING_BASE_URL;
+  delete process.env.MEMORY_EMBEDDING_API_KEY;
+  delete process.env.MEMORY_EMBEDDING_MODEL;
+  process.env.MEMORY_LLM_BASE_URL = 'https://llm.test/v1';
+  process.env.MEMORY_LLM_API_KEY = 'llm-key';
+  process.env.MEMORY_LLM_MODEL = 'semantic-primary';
+  delete process.env.MEMORY_LLM_FALLBACK_MODEL;
+  process.env.MEMORY_SEMANTIC_EXPANSION_ENABLED = 'true';
+  global.fetch = async () => Response.json({ error: { message: 'temporary' } }, { status: 503 });
+
+  try {
+    const [result] = await getEmbeddings(['rollback guide']);
+    assert.equal(result.provider, 'deterministic-hashed-v2');
+    assert.equal(result.ok, false);
+    assert.match(result.error || '', /HTTP 503/);
   } finally {
     global.fetch = originalFetch;
     for (const key of keys) {

@@ -1,8 +1,8 @@
-# Zenos Memory 2.3.0 Production Readiness
+# Zenos Memory 2.3.1 Production Readiness
 
 ## Production contract
 
-Zenos Memory 2.3.0 is production-ready for its intended scope: a personal, serverless memory service with Vercel compute and Google Drive-owned canonical data.
+Zenos Memory 2.3.1 is production-ready for its intended scope: a personal, serverless memory service with Vercel compute and Google Drive-owned canonical data.
 
 It is not positioned as a multi-tenant database, distributed vector database, secret vault, or agent execution framework.
 
