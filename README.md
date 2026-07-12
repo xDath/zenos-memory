@@ -62,7 +62,7 @@ A warm function instance materializes the latest verified snapshot plus delta ev
 | `POST /api/memory/remember` | Append a durable memory mutation |
 | `POST /api/memory/recall` | Retrieve current memories |
 | `POST /api/memory/hybrid-recall` | Hybrid lexical/vector/graph/lifecycle retrieval |
-| `POST /api/memory/compact` | Create a redacted structured handoff |
+| `POST /api/memory/compact` | Create a redacted, coverage-checked structured handoff from a separately bounded source transcript |
 | `POST /api/memory/bootstrap` | Build a bounded recovery context |
 | `GET /api/memory/graph` | Project evidence-backed relationships |
 | `POST /api/memory/backup` | Write verified snapshot, search index, graph index, and portable backup |
@@ -155,9 +155,15 @@ The production URL is:
 https://zenos-memory.vercel.app
 ```
 
+## Context continuity contract
+
+Compaction accepts a large but explicitly bounded source transcript (`input_max_chars`, up to 500,000 characters) while keeping the durable handoff independently bounded (`max_chars`, up to 24,000 characters). Long inputs preserve a small conversation head and the recent tail instead of keeping only the beginning.
+
+The response reports coverage for the active goal, decisions, pending work, open questions, and files/artifacts. Deterministic extraction fills missing LLM fields, and the raw transcript remains outside Memory as the canonical evidence source.
+
 ## Hermes integration
 
-The provider in `plugins/zenos-memory` performs token exchange, recall prefetch, turn synchronization, compact-before-compression, and bootstrap recovery. It never auto-stores credential-like turns.
+The provider in `plugins/zenos-memory` performs token exchange, recall prefetch, turn synchronization, compact-before-compression, and bootstrap recovery. Etla Runtime can additionally request a durable handoff when the Hermes Host working set crosses its absolute token limit. It never auto-stores credential-like turns.
 
 Installation and configuration are documented in `docs/HERMES_PLUGIN.md`.
 

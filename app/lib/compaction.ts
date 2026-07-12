@@ -17,6 +17,7 @@ export const CompactRequestSchema = z.object({
   session_id: z.string().optional(),
   conversation_id: z.string().optional(),
   max_chars: z.number().int().positive().max(24000).optional().default(10000),
+  input_max_chars: z.number().int().positive().max(500000).optional(),
   mode: z.enum(['deterministic', 'advanced', 'dag']).optional().default('dag'),
 });
 
@@ -170,7 +171,7 @@ function uniquePush(list: string[], value: string, max: number, clip = 220) {
 
 function inferTopics(messages: CompactRequest['messages']) {
   const scores = new Map<string, number>();
-  for (const msg of messages.slice(-120)) {
+  for (const msg of messages.slice(-240)) {
     const text = normalizeContent(msg.content);
     for (const [topic, re] of TOPIC_PATTERNS) {
       if (re.test(text)) scores.set(topic, (scores.get(topic) || 0) + (msg.role === 'user' ? 3 : 1));
@@ -188,7 +189,7 @@ function extractBlocks(messages: CompactRequest['messages'], maxPerBlock = 8) {
   const timeline: string[] = [];
   const topics = inferTopics(messages);
 
-  for (const msg of messages.slice(-120)) {
+  for (const msg of messages.slice(-240)) {
     const role = String(msg.role || 'unknown');
     const text = normalizeContent(msg.content);
     if (!text || text.length < 10) continue;
@@ -277,7 +278,7 @@ function summarizeChunk(chunk: { start: number; end: number; messages: CompactRe
 
 function buildCompactionDag(messages: CompactRequest['messages']) {
   const topics = inferTopics(messages);
-  const chunks = chunkMessages(messages.slice(-180), 12);
+  const chunks = chunkMessages(messages.slice(-300), 12);
   const leafNodes = chunks.map((chunk, idx) => {
     const summary = summarizeChunk(chunk);
     return {
