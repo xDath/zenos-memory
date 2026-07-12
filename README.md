@@ -123,6 +123,8 @@ npm audit
 
 The cloud integration gates verify real Drive CAS locking and handoff, cross-instance concurrent writes, global retry idempotency, bounded parallel event flushing, content-addressed snapshot/backup reuse, cold-start recovery, and archive replay.
 
+The route-contract suite additionally invokes real Next.js Route Handlers and verifies scoped authentication, malformed JSON, validation status codes, raw-secret rejection, bounded compact/bootstrap schemas, no-store headers, and stable `429` rate-limit responses.
+
 ## Migration
 
 Export and migrate the legacy Vercel/Drive deployment before replacing it:
