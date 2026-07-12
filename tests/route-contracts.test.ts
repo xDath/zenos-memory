@@ -80,7 +80,7 @@ test('public status is unauthenticated, no-store, and exposes the stable service
   assert.equal(response.headers.get('cache-control'), 'no-store');
   assert.equal(body.success, true);
   assert.equal(body.service, 'Zenos Memory');
-  assert.equal(body.version, '2.2.0');
+  assert.equal(body.version, '2.3.0');
   assert.equal(body.security?.raw_secret_storage, false);
   assert.equal(body.architecture?.canonical_store?.includes('Google Drive'), true);
 });

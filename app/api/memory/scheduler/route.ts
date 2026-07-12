@@ -12,6 +12,7 @@ const SchedulerSchema = z.object({
   backup: z.boolean().optional().default(true),
   prune: z.boolean().optional().default(true),
   store_report: z.boolean().optional().default(false),
+  reindex_embeddings: z.boolean().optional().default(true),
 });
 
 function equalSecret(left: string, right: string): boolean {
@@ -59,6 +60,7 @@ async function runMaintenance(request: NextRequest, input: unknown) {
       backup: parsed.backup,
       prune: parsed.prune,
       includeReport: parsed.store_report,
+      reindexEmbeddings: parsed.reindex_embeddings,
     });
 
     if (parsed.store_report) {
@@ -90,6 +92,7 @@ async function runMaintenance(request: NextRequest, input: unknown) {
       success: true,
       namespace: cycle.namespace,
       decayed: cycle.decayed,
+      embeddings: cycle.embeddings,
       backup: cycle.backup,
       retention: cycle.retention,
       health: cycle.health,
@@ -121,5 +124,6 @@ export async function GET(request: NextRequest) {
     backup: queryBoolean(params.get('backup'), true),
     prune: queryBoolean(params.get('prune'), true),
     store_report: queryBoolean(params.get('store_report'), false),
+    reindex_embeddings: queryBoolean(params.get('reindex_embeddings'), true),
   });
 }

@@ -21,6 +21,8 @@ function fixtureMemory(
     status?: Memory['metadata']['status'];
     supersedes?: string[];
     createdAt?: string;
+    embedding?: number[];
+    embeddingSpace?: string;
   } = {},
 ): Memory {
   const timestamp = options.createdAt || new Date().toISOString();
@@ -43,7 +45,13 @@ function fixtureMemory(
       is_secret: false,
       redacted: false,
       source: 'eval-fixture',
+      embedding_provider: options.embedding ? 'eval-dense' : undefined,
+      embedding_space: options.embeddingSpace,
+      embedding_dimensions: options.embedding?.length,
+      embedding_generated_at: options.embedding ? timestamp : undefined,
+      embedding_degraded: false,
     },
+    embedding: options.embedding,
     created_at: timestamp,
     updated_at: timestamp,
   });
@@ -102,14 +110,34 @@ export function runIntelligenceAmplificationEval() {
   const currentState = fixtureMemory(
     '44444444-4444-4444-8444-444444444444',
     'The canonical memory store is an append-only Google Drive event stream; Vercel performs compute and ephemeral SQLite only accelerates warm retrieval.',
-    { type: 'project', importance: 10, tags: ['storage', 'drive-events', 'vercel'], entities: ['Google Drive', 'Vercel'], supersedes: [oldState.id], createdAt: '2026-07-10T00:00:00.000Z' },
+    {
+      type: 'project',
+      importance: 10,
+      tags: ['storage', 'drive-events', 'vercel'],
+      entities: ['Google Drive', 'Vercel'],
+      supersedes: [oldState.id],
+      createdAt: '2026-07-10T00:00:00.000Z',
+      embedding: [1, 0, 0, 0, 0, 0, 0, 0],
+      embeddingSpace: 'dense:eval:8',
+    },
   );
   const unrelated = fixtureMemory(
     '55555555-5555-4555-8555-555555555555',
     'The profile picture uses a smooth pastel anime illustration style.',
-    { importance: 3, tags: ['design'], entities: ['Profile Picture'] },
+    {
+      importance: 3,
+      tags: ['design'],
+      entities: ['Profile Picture'],
+      embedding: [0, 1, 0, 0, 0, 0, 0, 0],
+      embeddingSpace: 'dense:eval:8',
+    },
   );
-  const ranked = rankHybrid('what is the current durable primary storage architecture', [oldState, currentState, unrelated], 3);
+  const ranked = rankHybrid(
+    'what is the current durable primary storage architecture',
+    [oldState, currentState, unrelated],
+    3,
+    { vector: [1, 0, 0, 0, 0, 0, 0, 0], space: 'dense:eval:8' },
+  );
 
   const relevantSimilarity = cosineSimilarity(
     deterministicEmbedding('current durable primary storage architecture'),
@@ -167,7 +195,7 @@ export function runIntelligenceAmplificationEval() {
     methodology: {
       scope: 'deterministic contract regression',
       claims: 'This validates invariants; it is not a scientific model-intelligence benchmark.',
-      retrieval_provider: 'deterministic hashed embedding baseline plus hybrid lifecycle ranking',
+      retrieval_provider: 'provider dense embeddings plus BM25-style sparse, graph, RRF, and lifecycle ranking with deterministic fallback',
     },
   };
 }

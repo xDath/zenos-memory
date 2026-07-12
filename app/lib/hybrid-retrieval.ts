@@ -9,11 +9,17 @@ export type HybridScore = {
     vector: number;
     keyword: number;
     graph: number;
+    fusion: number;
     recency: number;
     importance: number;
     confidence: number;
     current: number;
   };
+};
+
+export type QueryEmbedding = {
+  vector: number[];
+  space: string;
 };
 
 const STOP_WORDS = new Set([
@@ -30,13 +36,32 @@ function tokens(text: string): string[] {
     .filter(token => token.length > 1 && !STOP_WORDS.has(token));
 }
 
-function keywordScore(query: string, text: string): number {
-  const queryTokens = new Set(tokens(query));
-  if (!queryTokens.size) return 0;
-  const bodyTokens = new Set(tokens(text));
-  let hits = 0;
-  for (const token of queryTokens) if (bodyTokens.has(token)) hits += 1;
-  return hits / queryTokens.size;
+function lexicalScores(query: string, texts: string[]): number[] {
+  const queryTokens = [...new Set(tokens(query))];
+  if (!queryTokens.length) return texts.map(() => 0);
+  const documents = texts.map(text => tokens(text));
+  const averageLength = documents.reduce((sum, document) => sum + document.length, 0) / Math.max(1, documents.length);
+  const documentFrequency = new Map<string, number>();
+  for (const document of documents) {
+    for (const token of new Set(document)) documentFrequency.set(token, (documentFrequency.get(token) || 0) + 1);
+  }
+  const raw = documents.map((document, index) => {
+    const frequencies = new Map<string, number>();
+    for (const token of document) frequencies.set(token, (frequencies.get(token) || 0) + 1);
+    let score = 0;
+    for (const token of queryTokens) {
+      const frequency = frequencies.get(token) || 0;
+      if (!frequency) continue;
+      const seenIn = documentFrequency.get(token) || 0;
+      const inverseDocumentFrequency = Math.log(1 + (documents.length - seenIn + 0.5) / (seenIn + 0.5));
+      const denominator = frequency + 1.2 * (0.25 + 0.75 * document.length / Math.max(1, averageLength));
+      score += inverseDocumentFrequency * ((frequency * 2.2) / denominator);
+    }
+    if (texts[index].toLowerCase().includes(query.trim().toLowerCase())) score += 1.5;
+    return score;
+  });
+  const maximum = Math.max(...raw, 0);
+  return raw.map(score => maximum ? score / maximum : 0);
 }
 
 function recencyScore(memory: Memory): number {
@@ -77,39 +102,84 @@ function graphScores(query: string, memories: Memory[]): Map<string, number> {
   return result;
 }
 
-export function rankHybrid(query: string, memories: Memory[], limit = 10): HybridScore[] {
+function ranks(values: number[]): number[] {
+  const ordered = values
+    .map((value, index) => ({ value, index }))
+    .sort((left, right) => right.value - left.value || left.index - right.index);
+  const result = new Array<number>(values.length);
+  ordered.forEach((item, index) => { result[item.index] = index + 1; });
+  return result;
+}
+
+export function rankHybrid(
+  query: string,
+  memories: Memory[],
+  limit = 10,
+  queryEmbedding?: QueryEmbedding,
+): HybridScore[] {
   if (!memories.length) return [];
-  const queryVector = deterministicEmbedding(query);
+  const fallbackQueryVector = deterministicEmbedding(query);
   const graph = graphScores(query, memories);
   const emptyQuery = !query.trim();
+  const texts = memories.map(memory => `${memory.content} ${memory.metadata.tags.join(' ')} ${(memory.metadata.entities || []).join(' ')}`);
+  const keywordScores = emptyQuery ? memories.map(() => 0) : lexicalScores(query, texts);
 
-  return memories
-    .map(memory => {
-      const text = `${memory.content} ${memory.metadata.tags.join(' ')} ${(memory.metadata.entities || []).join(' ')}`;
-      const vector = emptyQuery
-        ? 0
-        : cosineSimilarity(queryVector, memory.embedding?.length ? memory.embedding : deterministicEmbedding(text));
-      const keyword = emptyQuery ? 0 : keywordScore(query, text);
-      const graphSignal = graph.get(memory.id) || 0;
-      const recency = recencyScore(memory);
-      const importance = (memory.metadata.importance || 5) / 10;
-      const confidence = memory.metadata.confidence || 0.8;
-      const current = currentScore(memory);
+  const candidates = memories.map((memory, index) => {
+    const text = texts[index];
+    const sameDenseSpace = Boolean(
+      queryEmbedding
+      && memory.embedding?.length
+      && memory.embedding.length === queryEmbedding.vector.length
+      && memory.metadata.embedding_space === queryEmbedding.space,
+    );
+    const vector = emptyQuery
+      ? 0
+      : Math.max(0, cosineSimilarity(
+          sameDenseSpace ? queryEmbedding!.vector : fallbackQueryVector,
+          sameDenseSpace ? memory.embedding! : deterministicEmbedding(text),
+        ));
+    return {
+      memory,
+      vector,
+      keyword: keywordScores[index],
+      graph: graph.get(memory.id) || 0,
+      recency: recencyScore(memory),
+      importance: (memory.metadata.importance || 5) / 10,
+      confidence: memory.metadata.confidence || 0.8,
+      current: currentScore(memory),
+      semanticMode: sameDenseSpace ? 'dense' : 'deterministic',
+    };
+  });
+
+  const vectorRanks = ranks(candidates.map(item => item.vector));
+  const keywordRanks = ranks(candidates.map(item => item.keyword));
+  const graphRanks = ranks(candidates.map(item => item.graph));
+  const rawFusion = candidates.map((item, index) => (
+    (item.vector > 0 ? 0.55 / (60 + vectorRanks[index]) : 0)
+    + (item.keyword > 0 ? 0.3 / (60 + keywordRanks[index]) : 0)
+    + (item.graph > 0 ? 0.15 / (60 + graphRanks[index]) : 0)
+  ));
+  const maximumFusion = Math.max(...rawFusion, 0);
+
+  return candidates
+    .map((item, index) => {
+      const { memory, vector, keyword, graph: graphSignal, recency, importance, confidence, current } = item;
+      const fusion = maximumFusion ? rawFusion[index] / maximumFusion : 0;
       const score = emptyQuery
         ? importance * 30 + confidence * 25 + recency * 20 + current * 25
-        : vector * 34 + keyword * 28 + graphSignal * 14 + importance * 8 + confidence * 7 + recency * 4 + current * 12;
+        : fusion * 48 + vector * 16 + keyword * 12 + graphSignal * 8 + importance * 5 + confidence * 4 + recency * 3 + current * 4;
       const reason = current === 0
         ? 'superseded-or-expired'
         : graphSignal >= 0.25
-          ? 'fts-vector-graph'
+          ? `${item.semanticMode}-sparse-graph-rrf`
           : keyword >= 0.5
-            ? 'fts-keyword-vector'
-            : 'fts-vector-quality';
+            ? `${item.semanticMode}-sparse-rrf`
+            : `${item.semanticMode}-quality-rrf`;
       return {
         memory,
         score,
         reason,
-        signals: { vector, keyword, graph: graphSignal, recency, importance, confidence, current },
+        signals: { vector, keyword, graph: graphSignal, fusion, recency, importance, confidence, current },
       };
     })
     .filter(item => item.signals.current > 0 || emptyQuery)

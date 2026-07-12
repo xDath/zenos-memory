@@ -19,7 +19,7 @@ export async function POST(request: NextRequest) {
       success: true,
       results,
       count: results.length,
-      retrieval: 'sqlite-fts5-hybrid-lifecycle-v1',
+      retrieval: 'dense-sparse-graph-rrf-lifecycle-v2',
       request_id: id,
     }, { requestId: id });
   } catch (error) {

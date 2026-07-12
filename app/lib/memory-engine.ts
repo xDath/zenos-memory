@@ -21,6 +21,7 @@ import { rankHybrid } from './hybrid-retrieval';
 import { buildKnowledgeMemories } from './knowledge-ingestion';
 import { buildMutationPlan } from './memory-mutation';
 import { buildMaintenanceReport } from './memory-maintainer';
+import { EmbeddingResult, getEmbedding, getEmbeddings } from './neural-embedding';
 import {
   InternalRecallRequestSchema,
   Memory,
@@ -69,6 +70,7 @@ interface MemoryHealthResult {
 interface MaintenanceCycleResult {
   namespace: string;
   decayed: number;
+  embeddings: { updated: number; space: string; degraded: number };
   backup: MaintenanceBackupResult | null;
   retention: Record<string, unknown> | null;
   health: MemoryHealthResult;
@@ -98,6 +100,16 @@ function uniqueStrings(values: Array<string | undefined>, max = 256): string[] {
 
 function metadataExtra(metadata: Partial<MemoryMetadata> | undefined): Record<string, unknown> {
   return (metadata || {}) as Record<string, unknown>;
+}
+
+function embeddingMetadata(result: EmbeddingResult): Partial<MemoryMetadata> {
+  return {
+    embedding_provider: result.provider,
+    embedding_space: result.space,
+    embedding_dimensions: result.dimensions,
+    embedding_generated_at: new Date().toISOString(),
+    embedding_degraded: !result.ok,
+  };
 }
 
 export class MemoryEngine {
@@ -450,7 +462,7 @@ export class MemoryEngine {
     return this.withCloudWrite(namespace, 'memory_created', () => this.rememberUnlocked(parsed));
   }
 
-  private async rememberUnlocked(parsed: RememberRequest): Promise<Memory> {
+  private async rememberUnlocked(parsed: RememberRequest, preparedEmbedding?: EmbeddingResult): Promise<Memory> {
     const namespace = normalizeNamespace(parsed.namespace);
     await this.ensureReady(namespace);
     const type = parsed.type || this.inferType(parsed.content);
@@ -490,7 +502,7 @@ export class MemoryEngine {
           importance: Math.max(existing.metadata.importance || 5, parsed.metadata?.importance || 5),
           tags: mergedTags,
         },
-      }, namespace, existing.metadata.version, parsed.idempotency_key, 'memory_deduplicated');
+      }, namespace, existing.metadata.version, parsed.idempotency_key, 'memory_deduplicated', preparedEmbedding);
       if (!updated) throw new StorageError('Duplicate memory disappeared during update');
       if (parsed.idempotency_key) this.store.putIdempotent(parsed.idempotency_key, 'remember', updated);
       return updated;
@@ -498,11 +510,17 @@ export class MemoryEngine {
 
     const active = this.store.list({ namespace, limit: 5000, includeArchived: false });
     const mutation = buildMutationPlan(parsed.content, active);
-    const autoTags = await this.autoTag(parsed.content);
-    const metadata = this.normalizedMetadata({
-      ...parsed.metadata,
-      tags: [...(parsed.metadata?.tags || []), ...autoTags],
-    }, parsed.content, now, mutation);
+    const [autoTags, embedding] = await Promise.all([
+      this.autoTag(parsed.content),
+      preparedEmbedding ? Promise.resolve(preparedEmbedding) : getEmbedding(parsed.content),
+    ]);
+    const metadata = MemoryMetadataSchema.parse({
+      ...this.normalizedMetadata({
+        ...parsed.metadata,
+        tags: [...(parsed.metadata?.tags || []), ...autoTags],
+      }, parsed.content, now, mutation),
+      ...embeddingMetadata(embedding),
+    });
     const memoryId = deterministicMemoryId(namespace, type, contentHash(parsed.content));
     const memory = MemorySchema.parse({
       id: memoryId,
@@ -510,6 +528,7 @@ export class MemoryEngine {
       content: parsed.content,
       namespace,
       metadata,
+      embedding: embedding.vector,
       created_at: now,
       updated_at: now,
     });
@@ -574,9 +593,11 @@ export class MemoryEngine {
 
     const results = new Array<Memory>(requests.length);
     for (const [namespace, group] of groups) {
+      const embeddings = await getEmbeddings(group.map(item => item.request.content));
       await this.withCloudWrite(namespace, 'memory_batch_created', async () => {
-        for (const item of group) {
-          results[item.index] = await this.rememberUnlocked(item.request);
+        for (let groupIndex = 0; groupIndex < group.length; groupIndex += 1) {
+          const item = group[groupIndex];
+          results[item.index] = await this.rememberUnlocked(item.request, embeddings[groupIndex]);
         }
       }, { deferEvents: true });
     }
@@ -638,7 +659,13 @@ export class MemoryEngine {
       return true;
     });
 
-    const ranked = rankHybrid(query, memories, limit)
+    const queryEmbedding = query ? await getEmbedding(query) : undefined;
+    const ranked = rankHybrid(
+      query,
+      memories,
+      limit,
+      queryEmbedding ? { vector: queryEmbedding.vector, space: queryEmbedding.space } : undefined,
+    )
       .map(item => ({
         ...item.memory,
         quality: this.computeQualityScore(item.memory),
@@ -728,6 +755,7 @@ export class MemoryEngine {
     expectedVersion?: number,
     idempotencyKey?: string,
     action = 'memory_updated',
+    preparedEmbedding?: EmbeddingResult,
   ): Promise<Memory | null> {
     const normalized = normalizeNamespace(namespace);
     await this.ensureReady(normalized);
@@ -736,11 +764,17 @@ export class MemoryEngine {
     const nextType = updates.type || current.type;
     const nextContent = updates.content || current.content;
     assertMemorySafe(nextContent, nextType);
+    const embedding = updates.embedding
+      ? undefined
+      : updates.content
+        ? preparedEmbedding || await getEmbedding(nextContent)
+        : undefined;
     const now = new Date().toISOString();
     const nextVersion = (current.metadata.version || 1) + 1;
     const metadata = MemoryMetadataSchema.parse({
       ...current.metadata,
       ...(updates.metadata || {}),
+      ...(embedding ? embeddingMetadata(embedding) : {}),
       version: nextVersion,
       tags: uniqueStrings([
         ...(current.metadata.tags || []),
@@ -760,6 +794,7 @@ export class MemoryEngine {
       content: nextContent,
       namespace: normalizeNamespace(updates.namespace || current.namespace),
       metadata,
+      embedding: updates.embedding || embedding?.vector || current.embedding,
       updated_at: now,
     });
     if (updated.namespace !== normalized && this.cloudMode) {
@@ -977,6 +1012,7 @@ export class MemoryEngine {
     backup?: boolean;
     prune?: boolean;
     includeReport?: boolean;
+    reindexEmbeddings?: boolean;
   } = {}): Promise<MaintenanceCycleResult> {
     const normalized = normalizeNamespace(
       options.namespace || process.env.ZENOS_MEMORY_DEFAULT_NAMESPACE || 'zenos',
@@ -990,6 +1026,9 @@ export class MemoryEngine {
           }))
         : null;
       const decayed = options.applyDecay === false ? 0 : await this.applyTemporalDecay(normalized);
+      const embeddings = options.reindexEmbeddings === false
+        ? { updated: 0, space: 'skipped', degraded: 0 }
+        : await this.reindexEmbeddings(normalized, 100);
       const backup = options.backup === false
         ? null
         : await this.backupMemories(normalized) as MaintenanceBackupResult;
@@ -1002,10 +1041,65 @@ export class MemoryEngine {
       return {
         namespace: normalized,
         decayed,
+        embeddings,
         backup,
         retention,
         health,
         maintenance,
+      };
+    });
+  }
+
+  async reindexEmbeddings(namespace = 'zenos', limit = 100): Promise<{ updated: number; space: string; degraded: number }> {
+    const normalized = normalizeNamespace(namespace);
+    return this.withCloudWrite(normalized, 'memory_embeddings_reindexed', async () => {
+      await this.ensureReady(normalized);
+      const active = this.store.list({
+        namespace: normalized,
+        limit: 10_000,
+        includeArchived: false,
+      }).filter(memory => !SECRET_TYPES.has(memory.type) && memory.metadata.status === 'active');
+      if (!active.length) return { updated: 0, space: 'empty', degraded: 0 };
+      const probe = await getEmbedding('zenos semantic vector space probe');
+      const candidates = active
+        .filter(memory => memory.metadata.embedding_space !== probe.space
+          || memory.embedding?.length !== probe.dimensions)
+        .slice(0, Math.max(1, Math.min(limit, 500)));
+      if (!candidates.length) return { updated: 0, space: probe.space, degraded: 0 };
+      const embeddings = await getEmbeddings(candidates.map(memory => memory.content));
+      const now = new Date().toISOString();
+      const updates = candidates.map((memory, index) => {
+        const embedding = embeddings[index];
+        return MemorySchema.parse({
+          ...memory,
+          metadata: {
+            ...memory.metadata,
+            ...embeddingMetadata(embedding),
+            version: (memory.metadata.version || 1) + 1,
+          },
+          embedding: embedding.vector,
+          updated_at: now,
+        });
+      });
+      this.store.transaction(() => {
+        for (let index = 0; index < updates.length; index += 1) {
+          this.store.update(updates[index], candidates[index].metadata.version || 1);
+        }
+        this.store.appendAudit({
+          action: 'memory_embeddings_reindexed',
+          namespace: normalized,
+          details: { updated: updates.length, space: embeddings[0]?.space, degraded: embeddings.filter(item => !item.ok).length },
+        });
+      });
+      await this.persistCloudChanges({
+        namespace: normalized,
+        action: 'memory_embeddings_reindexed',
+        changes: updates.map(memory => ({ operation: 'upsert' as const, memory })),
+      });
+      return {
+        updated: updates.length,
+        space: embeddings[0]?.space || probe.space,
+        degraded: embeddings.filter(item => !item.ok).length,
       };
     });
   }
