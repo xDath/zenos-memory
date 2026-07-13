@@ -120,7 +120,7 @@ function requiredScope(request: Request): AuthScope {
   const method = request.method.toUpperCase();
   if (/\/(?:backup|restore|debug-drive|benchmark|ab-eval|eval|maintain|scheduler|merge|lock|agent\/test-llm)(?:\/|$)/.test(path)) return 'memory:admin';
   if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return 'memory:read';
-  if (/\/(?:recall|hybrid-recall|answer|bootstrap|graph-query|vector|embed|auto-tag|mutation-plan|conflicts|resolve-conflict)(?:\/|$)/.test(path)) return 'memory:read';
+  if (/\/(?:recall|hybrid-recall|answer|bootstrap|authenticated-status|graph-query|vector|embed|auto-tag|mutation-plan|conflicts|resolve-conflict)(?:\/|$)/.test(path)) return 'memory:read';
   return 'memory:write';
 }
 
