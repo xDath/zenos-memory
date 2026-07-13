@@ -25,7 +25,8 @@
     "diagnose:auth": "node scripts/check-auth-scopes.mjs",
     "diagnose:drive": "tsx scripts/inspect-drive-layout.mjs",
     "migrate:drive-events": "tsx scripts/migrate-drive-events.mts",
-    "migrate:legacy-vercel": "tsx scripts/migrate-legacy-vercel.mts"
+    "migrate:legacy-vercel": "tsx scripts/migrate-legacy-vercel.mts",
+    "deploy:local": "bash deploy/install-local-service.sh"
   },
   "overrides": {
     "postcss": "8.5.10"
