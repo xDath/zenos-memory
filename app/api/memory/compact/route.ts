@@ -156,10 +156,13 @@ export async function POST(request: NextRequest) {
     let blocks: Record<string, unknown>;
     let coverage: CoverageReport;
     let model: string | null = null;
+    let llmUsage: Record<string, number> | null = null;
     let strategy: 'llm-structured-v2' | 'deterministic-structured-v3' | 'deterministic-dag-v3';
 
     if (hasMemoryLLM()) {
-      const result = await compactWithLLM(`${deterministic.content}\n\n## Bounded Source Transcript\n${conversationText}`);
+      // The deterministic snapshot remains the fallback/coverage source; do not
+      // duplicate it inside the LLM prompt alongside the same raw transcript.
+      const result = await compactWithLLM(conversationText);
       if (result.ok && result.parsed) {
         const merged = mergeCoverage(
           sanitizeUnknown(result.parsed) as Record<string, unknown>,
@@ -170,6 +173,13 @@ export async function POST(request: NextRequest) {
         coverage = merged.coverage;
         content = structuredContent(blocks, parsed.max_chars || 10_000);
         model = result.model || null;
+        llmUsage = {
+          input_tokens: result.input_tokens || 0,
+          output_tokens: result.output_tokens || 0,
+          reasoning_tokens: result.reasoning_tokens || 0,
+          cache_read_tokens: result.cache_read_tokens || 0,
+          total_tokens: result.total_tokens || 0,
+        };
         strategy = 'llm-structured-v2';
       } else {
         blocks = sanitizeUnknown(deterministic.blocks) as Record<string, unknown>;
@@ -200,6 +210,13 @@ export async function POST(request: NextRequest) {
 
     if (!content.trim()) throw new Error('Compaction produced no durable content');
     const engine = getMemoryEngine();
+    const previousCompacts = (await engine.list(namespace, 100))
+      .filter((item) => {
+        const tags = item.metadata.tags || [];
+        return tags.includes('compact') || tags.includes('structured-handoff') || tags.includes('dag-compact');
+      })
+      .slice(0, 20)
+      .map((item) => item.id);
     const memory = await engine.remember({
       content,
       type: 'insight',
@@ -209,6 +226,7 @@ export async function POST(request: NextRequest) {
         confidence: strategy.startsWith('llm') ? 0.92 : strategy.includes('dag') ? 0.88 : 0.8,
         importance: 10,
         tags: ['compact', 'structured-handoff', strategy, coverage.complete ? 'coverage-complete' : 'coverage-partial'],
+        supersedes_ids: previousCompacts,
         provenance: {
           session_id: parsed.session_id,
           conversation_id: parsed.conversation_id,
@@ -221,7 +239,16 @@ export async function POST(request: NextRequest) {
         reason: parsed.reason,
         compact_strategy: strategy,
         coverage,
-        blocks,
+        block_counts: {
+          decisions: stringList(blocks.key_decisions).length,
+          facts: stringList(blocks.important_facts).length,
+          completed: stringList(blocks.completed_work).length,
+          pending: stringList(blocks.pending_work).length,
+          blockers: stringList(blocks.blockers).length,
+          questions: stringList(blocks.open_questions).length,
+          artifacts: stringList(blocks.files_artifacts).length,
+        },
+        llm_usage: llmUsage,
       },
       idempotency_key: request.headers.get('idempotency-key') || undefined,
     });
@@ -233,6 +260,7 @@ export async function POST(request: NextRequest) {
       coverage,
       strategy,
       model,
+      llm_usage: llmUsage,
       credentials_stored: 0,
       secret_policy: 'raw-secrets-rejected',
       request_id: id,

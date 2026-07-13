@@ -102,6 +102,41 @@ function graphScores(query: string, memories: Memory[]): Map<string, number> {
   return result;
 }
 
+function lexicalSimilarity(left: Memory, right: Memory): number {
+  const leftTokens = new Set(tokens(`${left.content} ${(left.metadata.tags || []).join(' ')}`));
+  const rightTokens = new Set(tokens(`${right.content} ${(right.metadata.tags || []).join(' ')}`));
+  if (!leftTokens.size || !rightTokens.size) return 0;
+  let intersection = 0;
+  for (const token of leftTokens) if (rightTokens.has(token)) intersection += 1;
+  const union = new Set([...leftTokens, ...rightTokens]).size;
+  return union ? intersection / union : 0;
+}
+
+function diversify(ranked: HybridScore[], limit: number): HybridScore[] {
+  const remaining = [...ranked];
+  const selected: HybridScore[] = [];
+  const maximumScore = Math.max(...remaining.map((item) => item.score), 1);
+  while (remaining.length && selected.length < limit) {
+    let bestIndex = 0;
+    let bestValue = Number.NEGATIVE_INFINITY;
+    for (let index = 0; index < remaining.length; index += 1) {
+      const candidate = remaining[index];
+      const redundancy = selected.length
+        ? Math.max(...selected.map((item) => lexicalSimilarity(candidate.memory, item.memory)))
+        : 0;
+      const value = (candidate.score / maximumScore) * 0.78 - redundancy * 0.22;
+      if (value > bestValue) {
+        bestValue = value;
+        bestIndex = index;
+      }
+    }
+    const [chosen] = remaining.splice(bestIndex, 1);
+    const duplicate = selected.some((item) => lexicalSimilarity(chosen.memory, item.memory) >= 0.9);
+    if (!duplicate) selected.push(chosen);
+  }
+  return selected;
+}
+
 function ranks(values: number[]): number[] {
   const ordered = values
     .map((value, index) => ({ value, index }))
@@ -161,7 +196,7 @@ export function rankHybrid(
   ));
   const maximumFusion = Math.max(...rawFusion, 0);
 
-  return candidates
+  const ranked = candidates
     .map((item, index) => {
       const { memory, vector, keyword, graph: graphSignal, recency, importance, confidence, current } = item;
       const fusion = maximumFusion ? rawFusion[index] / maximumFusion : 0;
@@ -183,6 +218,6 @@ export function rankHybrid(
       };
     })
     .filter(item => item.signals.current > 0 || emptyQuery)
-    .sort((left, right) => right.score - left.score)
-    .slice(0, Math.max(1, Math.min(limit, 100)));
+    .sort((left, right) => right.score - left.score);
+  return diversify(ranked, Math.max(1, Math.min(limit, 100)));
 }

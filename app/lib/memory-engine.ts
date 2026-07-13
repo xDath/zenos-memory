@@ -123,6 +123,7 @@ export class MemoryEngine {
   private readonly writeContext = new AsyncLocalStorage<{
     namespace: string;
     lease: DriveLease;
+    assertLease: () => Promise<DriveLease>;
     deferred?: {
       events: CloudMemoryEvent[];
       idempotencyKeys: Set<string>;
@@ -225,13 +226,42 @@ export class MemoryEngine {
     if (pendingLocalWrite) await pendingLocalWrite;
 
     const owner = `${process.env.VERCEL_DEPLOYMENT_ID || process.env.VERCEL_REGION || 'node'}:${process.pid}:${action}:${randomUUID()}`;
-    const lease = await this.driveBackup.acquireCloudLease(
+    const leaseTtlMs = Math.max(
+      30_000,
+      Math.min(5 * 60_000, Number(process.env.ZENOS_MEMORY_WRITE_LEASE_MS || 90_000)),
+    );
+    let currentLease = await this.driveBackup.acquireCloudLease(
       normalized,
       'namespace-write',
       owner,
-      Math.max(30_000, Math.min(5 * 60_000, Number(process.env.ZENOS_MEMORY_WRITE_LEASE_MS || 90_000))),
+      leaseTtlMs,
       Math.max(5_000, Number(process.env.ZENOS_MEMORY_WRITE_WAIT_MS || 15_000)),
     );
+    let leaseFailure: Error | null = null;
+    let renewInFlight: Promise<DriveLease> | null = null;
+    const assertLease = async (): Promise<DriveLease> => {
+      if (leaseFailure) throw leaseFailure;
+      if (!renewInFlight) {
+        renewInFlight = this.driveBackup!.renewCloudLease(currentLease, leaseTtlMs)
+          .then((renewed) => {
+            currentLease = renewed;
+            return renewed;
+          })
+          .catch((error) => {
+            leaseFailure = error instanceof Error ? error : new ConflictError('Drive lease renewal failed');
+            throw leaseFailure;
+          })
+          .finally(() => {
+            renewInFlight = null;
+          });
+      }
+      return renewInFlight;
+    };
+    const heartbeat = setInterval(() => {
+      void assertLease().catch(() => undefined);
+    }, Math.max(5_000, Math.floor(leaseTtlMs / 3)));
+    heartbeat.unref?.();
+
     const deferred = options.deferEvents
       ? { events: [] as CloudMemoryEvent[], idempotencyKeys: new Set<string>() }
       : undefined;
@@ -242,7 +272,15 @@ export class MemoryEngine {
     this.namespaceWriteGates.set(normalized, writeGate);
     try {
       await this.refreshCloudNamespace(normalized, true);
-      const result = await this.writeContext.run({ namespace: normalized, lease, deferred }, operation);
+      const result = await this.writeContext.run({
+        namespace: normalized,
+        lease: currentLease,
+        assertLease,
+        deferred,
+      }, operation);
+      // Fencing check: never publish a final event batch after ownership was
+      // lost or the lease silently expired during a slow embedding/LLM call.
+      await assertLease();
       if (deferred?.events.length) {
         await this.driveBackup.appendCloudEvents(
           deferred.events,
@@ -263,11 +301,14 @@ export class MemoryEngine {
       });
       throw error;
     } finally {
+      clearInterval(heartbeat);
+      const pendingRenewal = renewInFlight as Promise<DriveLease> | null;
+      if (pendingRenewal) await pendingRenewal.catch(() => undefined);
       if (this.namespaceWriteGates.get(normalized) === writeGate) {
         this.namespaceWriteGates.delete(normalized);
       }
       releaseWriteGate();
-      await this.driveBackup.releaseCloudLease(lease).catch(() => false);
+      await this.driveBackup.releaseCloudLease(currentLease).catch(() => false);
     }
   }
 
@@ -304,6 +345,7 @@ export class MemoryEngine {
       return;
     }
 
+    if (active?.namespace === normalized) await active.assertLease();
     const uploaded = await this.driveBackup.appendCloudEvent(event);
     const nextState: MaterializedCloudState = {
       namespace: normalized,
@@ -459,7 +501,14 @@ export class MemoryEngine {
   async remember(request: RememberRequest): Promise<Memory> {
     const parsed = RememberRequestSchema.parse(request);
     const namespace = normalizeNamespace(parsed.namespace);
-    return this.withCloudWrite(namespace, 'memory_created', () => this.rememberUnlocked(parsed));
+    // External embedding latency must not consume the distributed write lease.
+    // Idempotency/deduplication is still rechecked after the lease is acquired.
+    const preparedEmbedding = await getEmbedding(parsed.content);
+    return this.withCloudWrite(
+      namespace,
+      'memory_created',
+      () => this.rememberUnlocked(parsed, preparedEmbedding),
+    );
   }
 
   private async rememberUnlocked(parsed: RememberRequest, preparedEmbedding?: EmbeddingResult): Promise<Memory> {
@@ -611,19 +660,31 @@ export class MemoryEngine {
   ): Promise<Memory[]> {
     const safeNamespace = normalizeNamespace(namespace);
     const candidates: RememberRequest[] = [];
+    const seen = new Set<string>();
+    const durableSignal = /\b(prefer|preference|suka|jangan|always|never|harus|must|decid|putus|pilih|pakai|project|repo|service|blocker|deadline|todo|pending|artifact|file|deploy|birthday|lahir|name is|nama|works? at|kerja|correction|koreksi|maksud)\b/i;
     for (const turn of conversation.filter(item => item.content && ['user', 'assistant'].includes(item.role))) {
       const redacted = redactSensitiveText(turn.content);
       for (const fact of this.extractFacts(redacted, safeNamespace)) {
+        // Conversation import is a semantic-memory path, not a raw archive.
+        // Assistant prose needs an explicit durable signal; user statements are
+        // retained only when they look like identity, preference, decision, or
+        // active project state.
+        if (!durableSignal.test(fact.content)) continue;
+        const key = fact.content.toLowerCase().replace(/\s+/g, ' ').slice(0, 500);
+        if (seen.has(key)) continue;
+        seen.add(key);
         candidates.push({
           ...fact,
           metadata: {
             ...fact.metadata,
             source: conversationId ? `conversation:${conversationId}` : 'conversation',
             provenance: { conversation_id: conversationId },
-            importance: Math.max(fact.metadata?.importance || 5, turn.role === 'user' ? 7 : 5),
+            importance: Math.max(fact.metadata?.importance || 5, turn.role === 'user' ? 8 : 6),
           },
         });
+        if (candidates.length >= 80) break;
       }
+      if (candidates.length >= 80) break;
     }
     return this.rememberBatch(candidates);
   }

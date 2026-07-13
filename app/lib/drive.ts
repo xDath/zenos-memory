@@ -140,7 +140,7 @@ export class GoogleDriveMemoryStore {
 
   private async listChildren(
     parentId: string,
-    options: { name?: string; mimeType?: string; orderBy?: string; pageSize?: number } = {},
+    options: { name?: string; mimeType?: string; orderBy?: string; pageSize?: number; maxItems?: number } = {},
   ): Promise<drive_v3.Schema$File[]> {
     const clauses = [`'${parentId}' in parents`, 'trashed=false'];
     if (options.name) clauses.push(`name='${escapeDriveQuery(options.name)}'`);
@@ -154,13 +154,17 @@ export class GoogleDriveMemoryStore {
         q: clauses.join(' and '),
         fields: 'nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,md5Checksum,size,appProperties,version)',
         orderBy: options.orderBy || 'createdTime asc,name asc',
-        pageSize: Math.min(1000, Math.max(1, options.pageSize || 1000)),
+        pageSize: Math.min(
+          1000,
+          Math.max(1, Math.min(options.pageSize || 1000, options.maxItems || 1000)),
+        ),
         pageToken,
       });
       files.push(...(response.data.files || []));
+      if (options.maxItems && files.length >= options.maxItems) break;
       pageToken = response.data.nextPageToken || undefined;
     } while (pageToken);
-    return files;
+    return options.maxItems ? files.slice(0, options.maxItems) : files;
   }
 
   private async findChildren(parentId: string, name: string, mimeType?: string): Promise<drive_v3.Schema$File[]> {
@@ -461,21 +465,25 @@ export class GoogleDriveMemoryStore {
 
   private async latestCloudSnapshot(namespace: string): Promise<CloudSnapshot | null> {
     const { snapshotsRoot } = await this.cloudNamespaceFolders(namespace);
-    const files = await this.listChildren(snapshotsRoot, { mimeType: JSON_MIME, orderBy: 'createdTime desc', pageSize: 100 });
-    const snapshots: CloudSnapshot[] = [];
+    const files = await this.listChildren(snapshotsRoot, {
+      mimeType: JSON_MIME,
+      orderBy: 'createdTime desc',
+      pageSize: 20,
+      maxItems: 20,
+    });
     for (const file of files) {
       if (!file.id || file.appProperties?.format !== 'zenos-memory-cloud-snapshot-v1') continue;
       try {
-        snapshots.push(validateCloudSnapshot(await this.readJsonById(file.id)));
+        // Namespace writes are serialized and snapshots are immutable, so the
+        // newest verified snapshot is also the furthest durable cursor. Return
+        // immediately instead of downloading and parsing every historical one.
+        return validateCloudSnapshot(await this.readJsonById(file.id));
       } catch {
-        // Corrupt or partially uploaded snapshots are ignored; verified history remains usable.
+        // Corrupt or partially uploaded snapshots are ignored; try the next
+        // newest verified snapshot before replaying the event log.
       }
     }
-    return snapshots.sort((a, b) => {
-      const cursorOrder = compareCloudCursor(b.through_cursor, a.through_cursor);
-      if (cursorOrder !== 0) return cursorOrder;
-      return b.generated_at.localeCompare(a.generated_at);
-    })[0] || null;
+    return null;
   }
 
   private async cloudEventsAfter(namespace: string, cursor: string | null): Promise<CloudMemoryEvent[]> {

@@ -62,6 +62,40 @@ function containsAll(text: string, terms: string[]): boolean {
   return terms.every(term => normalized.includes(term.toLowerCase()));
 }
 
+function retrievalMetrics(
+  corpus: Memory[],
+  queries: Array<{ query: string; relevant: string[] }>,
+) {
+  let recallAt1 = 0;
+  let recallAt3 = 0;
+  let reciprocalRank = 0;
+  let ndcgAt3 = 0;
+  const results = queries.map((item) => {
+    const ranked = rankHybrid(item.query, corpus, 3);
+    const ids = ranked.map(result => result.memory.id);
+    const firstRelevant = ids.findIndex(id => item.relevant.includes(id));
+    if (firstRelevant === 0) recallAt1 += 1;
+    if (firstRelevant >= 0 && firstRelevant < 3) recallAt3 += 1;
+    if (firstRelevant >= 0) reciprocalRank += 1 / (firstRelevant + 1);
+    const dcg = ids.reduce((sum, id, index) => (
+      sum + (item.relevant.includes(id) ? 1 / Math.log2(index + 2) : 0)
+    ), 0);
+    const idealHits = Math.min(item.relevant.length, 3);
+    const idcg = Array.from({ length: idealHits }, (_, index) => 1 / Math.log2(index + 2))
+      .reduce((sum, value) => sum + value, 0);
+    ndcgAt3 += idcg ? dcg / idcg : 1;
+    return { query: item.query, expected: item.relevant, ranked: ids, first_relevant_rank: firstRelevant + 1 };
+  });
+  const total = Math.max(1, queries.length);
+  return {
+    recall_at_1: recallAt1 / total,
+    recall_at_3: recallAt3 / total,
+    mrr: reciprocalRank / total,
+    ndcg_at_3: ndcgAt3 / total,
+    results,
+  };
+}
+
 export function runIntelligenceAmplificationEval() {
   const messages: CompactRequest['messages'] = [
     { role: 'user', content: 'The current goal is to harden Zenos Memory for durable production use.' },
@@ -139,6 +173,36 @@ export function runIntelligenceAmplificationEval() {
     { vector: [1, 0, 0, 0, 0, 0, 0, 0], space: 'dense:eval:8' },
   );
 
+  const personalCorpus = [
+    fixtureMemory(
+      '66666666-6666-4666-8666-666666666666',
+      'Host tetap menjadi pemikir utama dan orchestrator. Worker hanya mengumpulkan bukti, Verifier mengecek bila perlu, dan Boss hanya untuk eskalasi.',
+      { type: 'preference', importance: 10, tags: ['host', 'orchestrator', 'worker', 'verifier'] },
+    ),
+    fixtureMemory(
+      '77777777-7777-4777-8777-777777777777',
+      'Working context Host untuk pemakaian personal dibatasi 64 ribu token dan hasil compression ditargetkan sekitar 16 ribu token.',
+      { type: 'insight', importance: 9, tags: ['decision', 'token', 'context', 'compression'] },
+    ),
+    fixtureMemory(
+      '88888888-8888-4888-8888-888888888888',
+      'Zenos Memory menjaga keputusan, preferensi, blocker, dan state project supaya agent tidak lupa konteks durable.',
+      { type: 'project', importance: 9, tags: ['memory', 'context', 'durable'] },
+    ),
+    fixtureMemory(
+      '99999999-9999-4999-8999-999999999999',
+      'Encrypted secondary backups are stored on the VPS outside the Google Drive failure domain and verified after every write.',
+      { type: 'project', importance: 9, tags: ['backup', 'encrypted', 'vps'] },
+    ),
+    unrelated,
+  ];
+  const personalMetrics = retrievalMetrics(personalCorpus, [
+    { query: 'siapa yang jadi orchestrator utama?', relevant: ['66666666-6666-4666-8666-666666666666'] },
+    { query: 'berapa batas working context host dan target kompresinya?', relevant: ['77777777-7777-4777-8777-777777777777'] },
+    { query: 'gimana caranya biar agent nggak lupa keputusan project?', relevant: ['88888888-8888-4888-8888-888888888888'] },
+    { query: 'where is the encrypted secondary backup stored?', relevant: ['99999999-9999-4999-8999-999999999999'] },
+  ]);
+
   const relevantSimilarity = cosineSimilarity(
     deterministicEmbedding('current durable primary storage architecture'),
     deterministicEmbedding(currentState.content),
@@ -182,19 +246,27 @@ export function runIntelligenceAmplificationEval() {
         unrelated_similarity: Number(unrelatedSimilarity.toFixed(4)),
       },
     },
+    {
+      name: 'personal_bilingual_retrieval_metrics',
+      passed: personalMetrics.recall_at_1 >= 0.75
+        && personalMetrics.recall_at_3 === 1
+        && personalMetrics.mrr >= 0.85
+        && personalMetrics.ndcg_at_3 >= 0.85,
+      details: personalMetrics,
+    },
   ];
 
   const passed = cases.filter(item => item.passed).length;
   return {
     success: passed === cases.length,
-    benchmark: 'zenos-memory-contract-regression-v1',
+    benchmark: 'zenos-memory-personal-retrieval-regression-v2',
     score: Number((passed / cases.length).toFixed(4)),
     passed,
     failed: cases.length - passed,
     cases,
     methodology: {
-      scope: 'deterministic contract regression',
-      claims: 'This validates invariants; it is not a scientific model-intelligence benchmark.',
+      scope: 'deterministic contract plus bilingual personal-use retrieval regression',
+      claims: 'This validates invariants and retrieval metrics on a bounded noisy corpus; longitudinal evaluation on real user queries is still required.',
       retrieval_provider: 'provider dense embeddings plus BM25-style sparse, graph, RRF, and lifecycle ranking with deterministic fallback',
     },
   };

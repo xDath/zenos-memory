@@ -17,15 +17,25 @@ export async function POST(request: NextRequest) {
     const parsed = BootstrapRequestSchema.parse(await request.json());
     const engine = getMemoryEngine();
     const selected = new Map<string, Memory>();
-    const queries = [
-      'structured compact handoff recovery current goal pending decisions',
-      ...defaultBootstrapQueries(parsed.queries),
-    ];
-    for (const query of queries.slice(0, 8)) {
+
+    // The newest structured checkpoint is the canonical continuity pointer.
+    // Read it directly instead of paying for several broad semantic searches.
+    const recent = await engine.list(parsed.namespace, Math.max(80, parsed.limit * 8));
+    const latestCompact = recent.find((memory) => {
+      const tags = memory.metadata.tags || [];
+      return tags.includes('compact') || tags.includes('structured-handoff') || tags.includes('dag-compact');
+    });
+    if (latestCompact) selected.set(latestCompact.id, latestCompact);
+
+    // At most one semantic recall supplements the checkpoint with query-specific
+    // evidence. This keeps bootstrap bounded and prevents near-duplicate results.
+    const queries = defaultBootstrapQueries(parsed.queries);
+    const query = queries.slice(0, 2).join(' ');
+    if (query.trim()) {
       const results = await engine.recallWithQuality({
         query,
         namespace: parsed.namespace,
-        limit: parsed.limit,
+        limit: Math.max(3, parsed.limit),
       });
       for (const result of results) selected.set(result.id, result);
     }

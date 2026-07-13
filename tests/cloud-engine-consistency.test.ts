@@ -13,6 +13,8 @@ class FakeDriveStore {
   events: CloudMemoryEvent[] = [];
   failNextAppend = false;
   leaseAcquisitions = 0;
+  leaseRenewals = 0;
+  failNextRenewal = false;
   loadCount = 0;
 
   async loadCloudState(namespace: string) {
@@ -34,6 +36,18 @@ class FakeDriveStore {
       acquired_at: new Date().toISOString(),
       expires_at: new Date(Date.now() + 30_000).toISOString(),
       file_id: 'fake-lease-file',
+    };
+  }
+
+  async renewCloudLease(lease: DriveLease, ttlMs = 30_000): Promise<DriveLease> {
+    this.leaseRenewals += 1;
+    if (this.failNextRenewal) {
+      this.failNextRenewal = false;
+      throw new Error('simulated lease ownership loss');
+    }
+    return {
+      ...lease,
+      expires_at: new Date(Date.now() + ttlMs).toISOString(),
     };
   }
 
