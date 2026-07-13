@@ -79,7 +79,14 @@ function canonicalV2(request: Request, timestamp: number, nonce: string, bodyHas
   ].join('\n');
 }
 
-function verifySignatureV2(request: Request, secret: string, consumeNonce = true): boolean {
+type SignatureFailureReason = 'timestamp' | 'body_hash' | 'nonce_format' | 'signature_mismatch' | 'nonce_replay_or_capacity';
+
+function verifySignatureV2(
+  request: Request,
+  secret: string,
+  consumeNonce = true,
+  onFailure?: (reason: SignatureFailureReason) => void,
+): boolean {
   const tsRaw = request.headers.get('x-etla-timestamp') || '';
   const nonce = request.headers.get('x-etla-nonce') || '';
   const signature = request.headers.get('x-etla-signature') || '';
@@ -87,15 +94,29 @@ function verifySignatureV2(request: Request, secret: string, consumeNonce = true
   const timestamp = Number(tsRaw);
   const now = Date.now();
 
-  if (!Number.isSafeInteger(timestamp) || Math.abs(now - timestamp) > MAX_CLOCK_SKEW_MS) return false;
-  if (!/^[a-f0-9]{64}$/i.test(bodyHash)) return false;
-  if (!/^[a-zA-Z0-9_-]{16,128}$/.test(nonce)) return false;
+  if (!Number.isSafeInteger(timestamp) || Math.abs(now - timestamp) > MAX_CLOCK_SKEW_MS) {
+    onFailure?.('timestamp');
+    return false;
+  }
+  if (!/^[a-f0-9]{64}$/i.test(bodyHash)) {
+    onFailure?.('body_hash');
+    return false;
+  }
+  if (!/^[a-zA-Z0-9_-]{16,128}$/.test(nonce)) {
+    onFailure?.('nonce_format');
+    return false;
+  }
 
   const expected = createHmac('sha256', secret)
     .update(canonicalV2(request, timestamp, nonce, bodyHash), 'utf8')
     .digest('hex');
-  if (!safeEqualHex(signature, expected)) return false;
-  return !consumeNonce || claimNonce(nonce, now);
+  if (!safeEqualHex(signature, expected)) {
+    onFailure?.('signature_mismatch');
+    return false;
+  }
+  if (!consumeNonce || claimNonce(nonce, now)) return true;
+  onFailure?.('nonce_replay_or_capacity');
+  return false;
 }
 
 function verifyLegacySignature(request: Request, secret: string): boolean {
@@ -203,7 +224,11 @@ export async function authenticateTokenExchange(request: Request): Promise<boole
   const secret = process.env.ETLA_MASTER_SECRET?.trim() || process.env.ZENOS_MEMORY_SECRET?.trim();
   if (!secret) return false;
   if (verifyLegacySignature(request, secret)) return true;
-  if (!verifySignatureV2(request, secret, false)) return false;
+  let failureReason: SignatureFailureReason | undefined;
+  if (!verifySignatureV2(request, secret, false, (reason) => { failureReason = reason; })) {
+    console.warn('[ZenosMemory] Token exchange rejected', { reason: failureReason || 'unknown' });
+    return false;
+  }
 
   const nonce = request.headers.get('x-etla-nonce') || '';
   const cloudMode = process.env.ZENOS_MEMORY_STORAGE_MODE === 'drive-events';
