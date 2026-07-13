@@ -172,21 +172,34 @@ async function semanticExpansionEmbeddings(texts: string[]): Promise<{
   }
 
   const started = Date.now();
-  let lastError = 'Semantic expansion failed';
+  const results: EmbeddingResult[] = [];
   const attemptErrors: string[] = [];
-  for (const model of config.models) {
-    const remainingMs = config.totalBudgetMs - (Date.now() - started);
-    if (remainingMs < 3_000) break;
-    const attempt = await semanticExpansionAttempt(
-      texts,
-      model,
-      Math.min(config.attemptTimeoutMs, remainingMs),
-    );
-    if (attempt.results) return { attempted: true, results: attempt.results };
-    lastError = attempt.error || lastError;
-    attemptErrors.push(`${model}: ${lastError}`);
+  // One giant structured response is both token-wasteful and prone to Gemini
+  // reasoning/output truncation. Twenty items amortize provider framing while
+  // keeping each JSON contract comfortably bounded.
+  for (let offset = 0; offset < texts.length; offset += 20) {
+    const chunk = texts.slice(offset, offset + 20);
+    let expanded: EmbeddingResult[] | undefined;
+    for (const model of config.models) {
+      const remainingMs = config.totalBudgetMs - (Date.now() - started);
+      if (remainingMs < 3_000) break;
+      const attempt = await semanticExpansionAttempt(
+        chunk,
+        model,
+        Math.min(config.attemptTimeoutMs, remainingMs),
+      );
+      if (attempt.results) {
+        expanded = attempt.results;
+        break;
+      }
+      attemptErrors.push(`batch ${Math.floor(offset / 20) + 1} ${model}: ${attempt.error || 'failed'}`);
+    }
+    if (!expanded) {
+      return { attempted: true, error: attemptErrors.join('; ') || 'Semantic expansion failed' };
+    }
+    results.push(...expanded);
   }
-  return { attempted: true, error: attemptErrors.join('; ') || lastError };
+  return { attempted: true, results };
 }
 
 function validVector(value: unknown): value is number[] {

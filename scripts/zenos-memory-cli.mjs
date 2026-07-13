@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises';
 import { ZenosMemoryClient } from '../sdk/js/zenos-memory-client.mjs';
+import { loadZenosRuntimeEnv } from './runtime-env.mjs';
+
+loadZenosRuntimeEnv(process.cwd());
 
 const [command, ...args] = process.argv.slice(2);
 
@@ -14,6 +17,7 @@ Usage:
   npm run cli -- stats [namespace]
   npm run cli -- health [namespace]
   npm run cli -- backup [namespace]
+  npm run cli -- reindex [namespace]
   npm run cli -- restore <snapshot.json> [merge|replace] [namespace]
 
 Environment:
@@ -28,7 +32,7 @@ async function main() {
     usage();
     return;
   }
-  const client = new ZenosMemoryClient();
+  const client = new ZenosMemoryClient({ timeoutMs: 180_000 });
   let result;
   switch (command) {
     case 'remember': {
@@ -58,6 +62,9 @@ async function main() {
       break;
     case 'backup':
       result = await client.backup({ namespace: args[0] });
+      break;
+    case 'reindex':
+      result = await client.reindex({ namespace: args[0] });
       break;
     case 'restore': {
       const [filename, mode = 'merge', namespace] = args;

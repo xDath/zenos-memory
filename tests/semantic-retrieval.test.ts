@@ -272,6 +272,57 @@ test('semantic expansion retries a fallback model while preserving one stable ve
   }
 });
 
+test('semantic expansion batches large reindex jobs into bounded provider contracts', async () => {
+  const originalFetch = global.fetch;
+  const keys = [
+    'MEMORY_EMBEDDING_BASE_URL',
+    'MEMORY_EMBEDDING_API_KEY',
+    'MEMORY_EMBEDDING_MODEL',
+    'MEMORY_LLM_BASE_URL',
+    'MEMORY_LLM_API_KEY',
+    'MEMORY_LLM_MODEL',
+    'MEMORY_LLM_FALLBACK_MODEL',
+    'MEMORY_SEMANTIC_EXPANSION_ENABLED',
+  ] as const;
+  const original = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  delete process.env.MEMORY_EMBEDDING_BASE_URL;
+  delete process.env.MEMORY_EMBEDDING_API_KEY;
+  delete process.env.MEMORY_EMBEDDING_MODEL;
+  process.env.MEMORY_LLM_BASE_URL = 'https://llm.test/v1';
+  process.env.MEMORY_LLM_API_KEY = 'llm-key';
+  process.env.MEMORY_LLM_MODEL = 'semantic-primary';
+  delete process.env.MEMORY_LLM_FALLBACK_MODEL;
+  process.env.MEMORY_SEMANTIC_EXPANSION_ENABLED = 'true';
+  const batchSizes: number[] = [];
+  global.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body || '{}')) as { messages: Array<{ content: string }> };
+    const request = JSON.parse(body.messages[1].content) as { items: Array<{ index: number }> };
+    batchSizes.push(request.items.length);
+    return Response.json({
+      choices: [{
+        message: {
+          content: JSON.stringify({
+            items: request.items.map(item => ({ index: item.index, semantic_text: `bounded concept ${item.index}` })),
+          }),
+        },
+      }],
+    });
+  };
+
+  try {
+    const results = await getEmbeddings(Array.from({ length: 45 }, (_, index) => `memory ${index}`));
+    assert.deepEqual(batchSizes, [20, 20, 5]);
+    assert.equal(results.length, 45);
+    assert.equal(results.every(result => result.ok && result.provider === 'llm-semantic:semantic-primary'), true);
+  } finally {
+    global.fetch = originalFetch;
+    for (const key of keys) {
+      if (original[key] === undefined) delete process.env[key];
+      else process.env[key] = original[key];
+    }
+  }
+});
+
 test('failed semantic expansion is explicit instead of silently reporting a healthy embedding', async () => {
   const originalFetch = global.fetch;
   const keys = [

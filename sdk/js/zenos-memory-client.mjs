@@ -184,6 +184,17 @@ export class ZenosMemoryClient {
     }, { scopes: ['memory:admin'] });
   }
 
+  reindex(options = {}) {
+    return this.request('POST', '/api/memory/scheduler', {
+      namespace: options.namespace || this.namespace,
+      apply_decay: false,
+      backup: false,
+      prune: false,
+      store_report: false,
+      reindex_embeddings: true,
+    }, { scopes: ['memory:admin'] });
+  }
+
   restore(snapshot, options = {}) {
     return this.request('POST', '/api/memory/restore', {
       snapshot,

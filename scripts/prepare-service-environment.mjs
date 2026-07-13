@@ -50,6 +50,11 @@ for (const filename of arguments_.slice(0, runtimeMarker)) {
   }
 }
 
+// This generator is used by the VPS sidecar installer. Keep service-to-service
+// traffic on loopback; the separately deployed Vercel endpoint remains an
+// external recovery surface, not the local Runtime's primary dependency.
+values.set('ZENOS_MEMORY_URL', 'http://127.0.0.1:3091');
+
 const runtime = parseEnvironment(arguments_[runtimeMarker + 1]);
 const driveAliases = new Map([
   ['GOOGLE_OAUTH_CLIENT_ID', ['GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_CLIENT_ID']],

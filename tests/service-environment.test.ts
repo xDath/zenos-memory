@@ -40,6 +40,7 @@ test('Memory service credential is least-privilege and maps the smartest Gemini 
     assert.match(prepared, /^MEMORY_LLM_API_KEY=router-secret$/m);
     assert.match(prepared, /^MEMORY_LLM_MODEL=ag\/gemini-pro-agent$/m);
     assert.match(prepared, /^MEMORY_SEMANTIC_EXPANSION_MODEL=ag\/gemini-3\.5-flash-low$/m);
+    assert.match(prepared, /^ZENOS_MEMORY_URL=http:\/\/127\.0\.0\.1:3091$/m);
     assert.doesNotMatch(prepared, /^(?:GOOGLE_CLIENT_ID|GOOGLE_CLIENT_SECRET|GOOGLE_REFRESH_TOKEN)=/m);
     assert.doesNotMatch(prepared, /UNRELATED_PROVIDER|ZENOS_RUNTIME_API_KEY|must-not-cross-boundary/);
   } finally {
