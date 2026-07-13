@@ -79,12 +79,29 @@ HERMES_PROFILE=zenos ZENOS_MEMORY_URL=http://127.0.0.1:3091 \
 install -o root -g root -m 0644 "${SOURCE_ROOT}/deploy/zenos-memory.service" /etc/systemd/system/zenos-memory.service
 systemctl daemon-reload
 systemctl enable zenos-memory.service >/dev/null
-if ! systemctl restart zenos-memory.service; then
+rollback_memory() {
   if [[ -n "${PREVIOUS_RELEASE}" && -d "${PREVIOUS_RELEASE}" ]]; then
     ln -sfn "${PREVIOUS_RELEASE}" /opt/zenos-memory/current
     systemctl restart zenos-memory.service || true
   fi
+}
+if ! systemctl restart zenos-memory.service; then
+  rollback_memory
   echo "Zenos Memory deployment failed; restored the previous release." >&2
+  exit 1
+fi
+MEMORY_READY=false
+for _ in {1..30}; do
+  if curl --fail --silent --show-error --max-time 2 \
+    http://127.0.0.1:3091/api/memory/public-status >/dev/null; then
+    MEMORY_READY=true
+    break
+  fi
+  sleep 1
+done
+if [[ "${MEMORY_READY}" != "true" ]]; then
+  rollback_memory
+  echo "Zenos Memory failed its post-restart HTTP health gate; restored the previous release." >&2
   exit 1
 fi
 if [[ -n "${PREVIOUS_RELEASE}" && -d "${PREVIOUS_RELEASE}" && "${PREVIOUS_RELEASE}" != "${RELEASE_ROOT}" ]]; then
