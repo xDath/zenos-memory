@@ -57,7 +57,12 @@ for filename in sys.argv[2:]:
         match = re.match(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line)
         if not match:
             continue
-        values[match.group(1)] = match.group(2).strip()
+        key = match.group(1)
+        value = match.group(2).strip()
+        current = values.get(key, '').strip().strip('"\'')
+        candidate = value.strip().strip('"\'')
+        if key not in values or (not current and candidate):
+            values[key] = value
 output.write_text("".join(f"{key}={value}\n" for key, value in sorted(values.items())), encoding="utf-8")
 PY
 if [[ ! -s "${CREDENTIAL_TMP}" ]]; then
