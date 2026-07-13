@@ -7,8 +7,7 @@ Type=simple
 User=zenos-memory
 Group=zenos-memory
 WorkingDirectory=/opt/zenos-memory/current
-EnvironmentFile=-/etc/zenos-memory/memory.env
-EnvironmentFile=-/etc/zenos-memory/profile.env
+LoadCredentialEncrypted=zenos-memory.env:/etc/credstore.encrypted/zenos-memory.env.cred
 Environment=HOME=/var/lib/zenos-memory
 Environment=NODE_ENV=production
 Environment=HOSTNAME=127.0.0.1

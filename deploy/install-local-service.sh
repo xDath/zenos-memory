@@ -33,8 +33,46 @@ rm -rf "${RELEASE_ROOT}"
 mv "${STAGING}" "${RELEASE_ROOT}"
 ln -sfn "${RELEASE_ROOT}" /opt/zenos-memory/current
 
-[[ ! -f "${SOURCE_ROOT}/.env.local" ]] || install -o root -g "${SERVICE_GROUP}" -m 0640 "${SOURCE_ROOT}/.env.local" /etc/zenos-memory/memory.env
-[[ ! -f /root/.hermes/profiles/zenos/.env ]] || install -o root -g "${SERVICE_GROUP}" -m 0640 /root/.hermes/profiles/zenos/.env /etc/zenos-memory/profile.env
+install -d -o root -g root -m 0700 /etc/credstore.encrypted
+CREDENTIAL_TMP="$(mktemp)"
+cleanup() {
+  rm -f "${CREDENTIAL_TMP}"
+}
+trap cleanup EXIT
+python3 - "${CREDENTIAL_TMP}" "${SOURCE_ROOT}/.env.local" /root/.hermes/profiles/zenos/.env <<'PY'
+import re
+import sys
+from pathlib import Path
+
+output = Path(sys.argv[1])
+values: dict[str, str] = {}
+for filename in sys.argv[2:]:
+    path = Path(filename)
+    if not path.is_file():
+        continue
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = re.match(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line)
+        if not match:
+            continue
+        values[match.group(1)] = match.group(2).strip()
+output.write_text("".join(f"{key}={value}\n" for key, value in sorted(values.items())), encoding="utf-8")
+PY
+if [[ ! -s "${CREDENTIAL_TMP}" ]]; then
+  echo "No Zenos Memory credential source was found." >&2
+  exit 1
+fi
+chmod 0600 "${CREDENTIAL_TMP}"
+rm -f /etc/credstore.encrypted/zenos-memory.env.cred
+systemd-creds encrypt --with-key=host --name=zenos-memory.env \
+  "${CREDENTIAL_TMP}" /etc/credstore.encrypted/zenos-memory.env.cred >/dev/null
+chmod 0600 /etc/credstore.encrypted/zenos-memory.env.cred
+rm -f /etc/zenos-memory/memory.env /etc/zenos-memory/profile.env
+
+HERMES_PROFILE=zenos ZENOS_MEMORY_URL=http://127.0.0.1:3091 \
+  bash "${SOURCE_ROOT}/scripts/install-hermes-plugin.sh"
 install -o root -g root -m 0644 "${SOURCE_ROOT}/deploy/zenos-memory.service" /etc/systemd/system/zenos-memory.service
 systemctl daemon-reload
 systemctl enable zenos-memory.service >/dev/null

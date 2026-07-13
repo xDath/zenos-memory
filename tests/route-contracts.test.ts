@@ -11,6 +11,7 @@ import { POST as bootstrapPost } from '../app/api/memory/bootstrap/route';
 import { POST as compactPost } from '../app/api/memory/compact/route';
 import { GET as publicStatusGet } from '../app/api/memory/public-status/route';
 import { POST as rememberPost } from '../app/api/memory/remember/route';
+import { POST as revisionPost } from '../app/api/memory/revision/route';
 
 const secret = 'route-contract-secret-that-is-long-enough-for-tests';
 let directory = '';
@@ -46,6 +47,7 @@ interface RouteBody {
   bootstrap?: string;
   sources?: unknown[];
   request_id?: string;
+  revision?: string;
 }
 
 async function json(response: Response): Promise<RouteBody> {
@@ -128,6 +130,39 @@ test('remember validates malformed JSON, rejects raw secrets, and returns a 201 
   assert.equal(validBody.memory?.namespace, 'route-contract');
   assert.equal(typeof validBody.memory?.id, 'string');
   assert.equal(typeof validBody.request_id, 'string');
+});
+
+test('namespace revision is read-scoped and changes after a durable write', async () => {
+  const readToken = issueEtlaToken(secret, { scopes: ['memory:read'], subject: 'route-contract' });
+  const writeToken = issueEtlaToken(secret, { scopes: ['memory:write'], subject: 'route-contract' });
+
+  const missing = await revisionPost(request('/api/memory/revision', {
+    body: { namespace: 'route-contract' },
+  }));
+  const beforeResponse = await revisionPost(request('/api/memory/revision', {
+    token: readToken,
+    body: { namespace: 'route-contract' },
+  }));
+  const before = await json(beforeResponse);
+
+  await rememberPost(request('/api/memory/remember', {
+    token: writeToken,
+    headers: { 'idempotency-key': 'route-contract-revision-001' },
+    body: { content: 'Revision-aware recall caches invalidate after writes.', namespace: 'route-contract', type: 'fact' },
+  }));
+
+  const afterResponse = await revisionPost(request('/api/memory/revision', {
+    token: readToken,
+    body: { namespace: 'route-contract', force: true },
+  }));
+  const after = await json(afterResponse);
+
+  assert.equal(missing.status, 401);
+  assert.equal(beforeResponse.status, 200);
+  assert.equal(afterResponse.status, 200);
+  assert.equal(typeof before.revision, 'string');
+  assert.equal(typeof after.revision, 'string');
+  assert.notEqual(after.revision, before.revision);
 });
 
 test('compact and bootstrap enforce read/write scopes and preserve bounded handoff response contracts', async () => {

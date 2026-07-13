@@ -1,7 +1,8 @@
 """Zenos Memory provider for Hermes.
 
-This provider makes the deployed Zenos Memory service the default external
-memory backend. It uses Etla HMAC signatures, so the raw secret is never sent.
+Zenos Runtime owns automatic current-turn recall. This provider supplies a
+small explicit tool surface, durable salience-gated writes, and one bounded
+checkpoint at a real Hermes compression boundary.
 """
 from __future__ import annotations
 
@@ -16,7 +17,6 @@ import threading
 import time
 from typing import Any, Dict, List
 from urllib import request as urllib_request
-from urllib.parse import quote as _urlquote
 from urllib.error import HTTPError, URLError
 
 from agent.memory_provider import MemoryProvider
@@ -24,7 +24,7 @@ from tools.registry import tool_error
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BASE_URL = "https://zenos-memory.vercel.app"
+DEFAULT_BASE_URL = "http://127.0.0.1:3091"
 DEFAULT_NAMESPACE = "zenos"
 
 
@@ -35,16 +35,13 @@ def _load_config() -> dict:
         "base_url": os.environ.get("ZENOS_MEMORY_URL", DEFAULT_BASE_URL),
         "secret": os.environ.get("ETLA_MASTER_SECRET", ""),
         "namespace": os.environ.get("ZENOS_MEMORY_NAMESPACE", DEFAULT_NAMESPACE),
-        "prefetch_limit": int(os.environ.get("ZENOS_MEMORY_PREFETCH_LIMIT", "5")),
-        "auto_compact_every": int(os.environ.get("ZENOS_MEMORY_AUTO_COMPACT_EVERY", "10")),
-        "auto_compact_min_chars": int(os.environ.get("ZENOS_MEMORY_AUTO_COMPACT_MIN_CHARS", "6000")),
         "auto_compact_max_messages": int(os.environ.get("ZENOS_MEMORY_AUTO_COMPACT_MAX_MESSAGES", "80")),
     }
     path = get_hermes_home() / "zenos-memory.json"
     if path.exists():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            cfg.update({k: v for k, v in data.items() if v not in (None, "")})
+            cfg.update({key: value for key, value in data.items() if value not in (None, "")})
         except Exception:
             logger.exception("Failed to load zenos-memory.json")
     return cfg
@@ -84,14 +81,9 @@ class ZenosMemoryProvider(MemoryProvider):
         self._base_url = DEFAULT_BASE_URL
         self._secret = ""
         self._namespace = DEFAULT_NAMESPACE
-        self._prefetch_limit = 5
-        self._auto_compact_every = 10
-        self._auto_compact_min_chars = 6000
+        self._session_id = ""
         self._auto_compact_max_messages = 80
-        self._prefetch_result = ""
-        self._prefetch_lock = threading.Lock()
-        self._prefetch_thread: threading.Thread | None = None
-        self._sync_thread: threading.Thread | None = None
+        self._last_compact_message_count = 0
         self._token_cache: dict[str, tuple[str, float]] = {}
         self._token_lock = threading.Lock()
 
@@ -102,6 +94,7 @@ class ZenosMemoryProvider(MemoryProvider):
     def save_config(self, values, hermes_home):
         from pathlib import Path
         from utils import atomic_json_write
+
         path = Path(hermes_home) / "zenos-memory.json"
         existing = {}
         if path.exists():
@@ -115,7 +108,13 @@ class ZenosMemoryProvider(MemoryProvider):
     def get_config_schema(self):
         return [
             {"key": "base_url", "description": "Zenos Memory base URL", "default": DEFAULT_BASE_URL},
-            {"key": "secret", "description": "Etla master secret for HMAC signing", "secret": True, "required": True, "env_var": "ETLA_MASTER_SECRET"},
+            {
+                "key": "secret",
+                "description": "Etla master secret for HMAC signing",
+                "secret": True,
+                "required": True,
+                "env_var": "ETLA_MASTER_SECRET",
+            },
             {"key": "namespace", "description": "Default namespace", "default": DEFAULT_NAMESPACE},
         ]
 
@@ -124,19 +123,18 @@ class ZenosMemoryProvider(MemoryProvider):
         self._base_url = str(self._cfg.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
         self._secret = str(self._cfg.get("secret") or "")
         self._namespace = str(self._cfg.get("namespace") or DEFAULT_NAMESPACE)
-        self._prefetch_limit = int(self._cfg.get("prefetch_limit") or 5)
-        self._auto_compact_every = int(self._cfg.get("auto_compact_every") or 10)
-        self._auto_compact_min_chars = int(self._cfg.get("auto_compact_min_chars") or 6000)
-        self._auto_compact_max_messages = int(self._cfg.get("auto_compact_max_messages") or 80)
-        self._turn_count = 0
-        self._auto_bootstrap()
+        self._session_id = str(session_id or "")
+        self._auto_compact_max_messages = max(
+            20,
+            min(int(self._cfg.get("auto_compact_max_messages") or 80), 160),
+        )
+        self._last_compact_message_count = 0
 
     def system_prompt_block(self) -> str:
         return (
             "# Zenos Memory\n"
-            "Active as the durable context continuity backend. "
-            "Use zenos_memory_search for relevant recall and zenos_memory_remember for durable, non-secret facts. "
-            "Raw credentials are never stored; use an external vault and remember only vault references."
+            "Runtime supplies bounded automatic recall. Use zenos_memory_search only for extra evidence and "
+            "zenos_memory_remember only for durable non-secret facts, preferences, decisions, or tasks."
         )
 
     def _token(self, scopes: tuple[str, ...] = ("memory:read", "memory:write")) -> str:
@@ -150,8 +148,8 @@ class ZenosMemoryProvider(MemoryProvider):
             headers = _token_exchange_headers(self._secret, list(scopes))
             req = urllib_request.Request(self._base_url + "/api/auth", headers=headers, method="POST")
             try:
-                with urllib_request.urlopen(req, timeout=20) as resp:
-                    payload = json.loads(resp.read().decode("utf-8") or "{}")
+                with urllib_request.urlopen(req, timeout=20) as response:
+                    payload = json.loads(response.read().decode("utf-8") or "{}")
             except HTTPError as exc:
                 raise RuntimeError(f"Zenos token exchange failed with HTTP {exc.code}") from exc
             except URLError as exc:
@@ -163,7 +161,14 @@ class ZenosMemoryProvider(MemoryProvider):
             self._token_cache[cache_key] = (token, time.time() + expires_in)
             return token
 
-    def _request(self, method: str, path: str, body: dict | None = None, scopes: tuple[str, ...] | None = None) -> dict:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        body: dict | None = None,
+        scopes: tuple[str, ...] | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict:
         method = method.upper()
         required = scopes or (("memory:read",) if method in ("GET", "HEAD") else ("memory:read", "memory:write"))
         data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -173,10 +178,12 @@ class ZenosMemoryProvider(MemoryProvider):
         }
         if data is not None:
             headers["Content-Type"] = "application/json"
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key[:200]
         req = urllib_request.Request(self._base_url + path, data=data, headers=headers, method=method)
         try:
-            with urllib_request.urlopen(req, timeout=20) as resp:
-                raw = resp.read().decode("utf-8")
+            with urllib_request.urlopen(req, timeout=30) as response:
+                raw = response.read().decode("utf-8")
                 return json.loads(raw) if raw else {}
         except HTTPError as exc:
             if exc.code == 401:
@@ -186,180 +193,221 @@ class ZenosMemoryProvider(MemoryProvider):
         except URLError as exc:
             raise RuntimeError("Zenos Memory is unreachable") from exc
 
-    def _request_text(self, method: str, path: str, body: dict | None = None) -> str:
-        method = method.upper()
-        required = ("memory:read",) if method in ("GET", "HEAD") else ("memory:read", "memory:write")
-        data = json.dumps(body).encode("utf-8") if body is not None else None
-        headers = {"Authorization": f"Bearer {self._token(required)}"}
-        if data is not None:
-            headers["Content-Type"] = "application/json"
-        req = urllib_request.Request(self._base_url + path, data=data, headers=headers, method=method)
-        with urllib_request.urlopen(req, timeout=20) as resp:
-            return resp.read().decode("utf-8")
-
-    def _remember(self, content: str, *, namespace: str | None = None, memory_type: str = "fact", metadata: dict | None = None) -> dict:
-        return self._request("POST", "/api/memory/remember", {
-            "content": content,
-            "type": memory_type,
-            "namespace": namespace or self._namespace,
-            "metadata": metadata or {},
-        })
+    def _remember(
+        self,
+        content: str,
+        *,
+        namespace: str | None = None,
+        memory_type: str = "fact",
+        metadata: dict | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict:
+        return self._request(
+            "POST",
+            "/api/memory/remember",
+            {
+                "content": content,
+                "type": memory_type,
+                "namespace": namespace or self._namespace,
+                "metadata": metadata or {},
+            },
+            idempotency_key=idempotency_key,
+        )
 
     def _search(self, query: str, *, namespace: str | None = None, limit: int = 10) -> dict:
-        return self._request("POST", "/api/memory/recall", {
-            "query": query,
-            "namespace": namespace or self._namespace,
-            "limit": max(1, min(limit, 50)),
-        })
+        return self._request(
+            "POST",
+            "/api/memory/recall",
+            {
+                "query": query,
+                "namespace": namespace or self._namespace,
+                "limit": max(1, min(limit, 20)),
+            },
+            scopes=("memory:read",),
+        )
 
     def _format_results(self, response: dict) -> str:
         results = response.get("results") or response.get("memories") or []
         if not results:
             return "No Zenos Memory results."
         lines = []
-        for i, m in enumerate(results, 1):
-            content = m.get("content") or str(m)
-            mtype = m.get("type", "memory")
-            conf = (m.get("metadata") or {}).get("confidence", "")
-            suffix = f" (type={mtype}, confidence={conf})" if conf != "" else f" (type={mtype})"
-            lines.append(f"{i}. {content}{suffix}")
+        for index, memory in enumerate(results, 1):
+            content = memory.get("content") or str(memory)
+            memory_type = memory.get("type", "memory")
+            confidence = (memory.get("metadata") or {}).get("confidence", "")
+            suffix = (
+                f" (type={memory_type}, confidence={confidence})"
+                if confidence != ""
+                else f" (type={memory_type})"
+            )
+            lines.append(f"{index}. {content}{suffix}")
         return "\n".join(lines)
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        if self._prefetch_thread and self._prefetch_thread.is_alive():
-            self._prefetch_thread.join(timeout=2.0)
-        with self._prefetch_lock:
-            result = self._prefetch_result
-            self._prefetch_result = ""
-        return result
+        """Runtime owns automatic current-turn recall; never inject stale next-turn data."""
+        return ""
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
-        if not query or not self._secret:
-            return
-        if self._prefetch_thread and self._prefetch_thread.is_alive():
-            return
-
-        def worker():
-            try:
-                res = self._search(query, limit=self._prefetch_limit)
-                formatted = self._format_results(res)
-                if formatted and not formatted.startswith("No Zenos"):
-                    formatted = "# Zenos Memory Recall\n" + formatted
-                else:
-                    formatted = ""
-                with self._prefetch_lock:
-                    self._prefetch_result = formatted
-            except Exception:
-                logger.debug("Zenos Memory prefetch failed", exc_info=True)
-
-        self._prefetch_thread = threading.Thread(target=worker, daemon=True)
-        self._prefetch_thread.start()
+        return
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "", messages=None) -> None:
+        """Persist only explicit durable user state on MemoryManager's serialized worker."""
         if not self._secret or not user_content:
             return
-        if self._sync_thread and self._sync_thread.is_alive():
+        candidate = self._salient_memory(user_content)
+        if candidate is None:
             return
-
-        def worker():
-            try:
-                text = f"User: {user_content}\nAssistant: {assistant_content[:1500]}"
-                if self._looks_like_credential(text):
-                    logger.info("Zenos Memory skipped a credential-like turn; store secrets in an external vault")
-                    return
-                self._remember(text, memory_type="conversation", metadata={"source": "turn", "session_id": session_id})
-            except Exception:
-                logger.debug("Zenos Memory sync failed", exc_info=True)
-
-        self._turn_count += 1
-        if self._should_auto_compact(user_content, assistant_content, messages):
-            self._auto_compact(user_content, assistant_content, session_id, messages=messages)
-        self._sync_thread = threading.Thread(target=worker, daemon=True)
-        self._sync_thread.start()
+        content, memory_type, importance = candidate
+        if self._looks_like_credential(content):
+            logger.info("Zenos Memory skipped a credential-like turn; store secrets in an external vault")
+            return
+        digest = hashlib.sha256(
+            f"{session_id or self._session_id}\n{memory_type}\n{content}".encode("utf-8")
+        ).hexdigest()[:32]
+        try:
+            self._remember(
+                content,
+                memory_type=memory_type,
+                metadata={
+                    "source": "hermes-salience-gate-v2",
+                    "session_id": session_id or self._session_id,
+                    "confidence": 0.94 if memory_type in {"preference", "decision"} else 0.86,
+                    "importance": importance,
+                },
+                idempotency_key=f"hermes-salience:{digest}",
+            )
+        except Exception:
+            logger.debug("Zenos Memory salient sync failed", exc_info=True)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [
             {
                 "name": "zenos_memory_remember",
-                "description": "Store a durable memory in Zenos Memory (default replacement for Mem0/Memanto).",
-                "parameters": {"type": "object", "properties": {"content": {"type": "string"}, "namespace": {"type": "string"}, "type": {"type": "string"}, "metadata": {"type": "object"}}, "required": ["content"]},
+                "description": "Store one durable non-secret fact, preference, decision, or task in Zenos Memory.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string"},
+                        "namespace": {"type": "string"},
+                        "type": {"type": "string"},
+                        "metadata": {"type": "object"},
+                    },
+                    "required": ["content"],
+                },
             },
             {
                 "name": "zenos_memory_search",
-                "description": "Search Zenos Memory semantically/keyword by query.",
-                "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "namespace": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["query"]},
+                "description": "Search Zenos Memory only when Runtime's bounded automatic recall lacks needed evidence.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "namespace": {"type": "string"},
+                        "limit": {"type": "integer"},
+                    },
+                    "required": ["query"],
+                },
             },
             {
                 "name": "zenos_memory_compact",
-                "description": "Trigger advanced LLM-powered compact for structured handoff.",
-                "parameters": {"type": "object", "properties": {"messages": {"type": "array"}, "namespace": {"type": "string"}, "reason": {"type": "string"}}, "required": ["messages"]},
-            },
-            {
-                "name": "zenos_memory_bootstrap",
-                "description": "Bootstrap from latest compact for context recovery.",
-                "parameters": {"type": "object", "properties": {"namespace": {"type": "string"}}, "required": []},
-            },
-            {
-                "name": "zenos_memory_graph_query",
-                "description": "Query the temporal graph with vector + graph traversal.",
-                "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "namespace": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["query"]},
-            },
-            {
-                "name": "zenos_memory_mermaid",
-                "description": "Get Mermaid graph visualization text for the memory graph.",
-                "parameters": {"type": "object", "properties": {"namespace": {"type": "string"}}, "required": []},
-            },
-            {
-                "name": "zenos_memory_dashboard",
-                "description": "Get a dashboard summary of memory health, graph stats, eval readiness and recommendations.",
-                "parameters": {"type": "object", "properties": {"namespace": {"type": "string"}}, "required": []},
-            },
-            {
-                "name": "zenos_memory_report",
-                "description": "Get a Zenos Memory daily intelligence report for a namespace.",
-                "parameters": {"type": "object", "properties": {"namespace": {"type": "string"}}, "required": []},
+                "description": "Create a manual bounded structured continuity checkpoint.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "messages": {"type": "array"},
+                        "namespace": {"type": "string"},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["messages"],
+                },
             },
         ]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         try:
             if tool_name == "zenos_memory_remember":
-                return json.dumps(self._remember(args["content"], namespace=args.get("namespace"), memory_type=args.get("type", "fact"), metadata=args.get("metadata") or {}), ensure_ascii=False)
+                content = str(args["content"]).strip()
+                if self._looks_like_credential(content):
+                    return tool_error("Refusing to store credential-like content; store only a vault reference")
+                return json.dumps(
+                    self._remember(
+                        content,
+                        namespace=args.get("namespace"),
+                        memory_type=args.get("type", "fact"),
+                        metadata=args.get("metadata") or {},
+                    ),
+                    ensure_ascii=False,
+                )
             if tool_name == "zenos_memory_search":
-                res = self._search(args["query"], namespace=args.get("namespace"), limit=int(args.get("limit", 10)))
-                return json.dumps({"success": True, "formatted": self._format_results(res), "raw": res}, ensure_ascii=False)
+                result = self._search(
+                    str(args["query"]),
+                    namespace=args.get("namespace"),
+                    limit=int(args.get("limit", 8)),
+                )
+                return json.dumps(
+                    {"success": True, "formatted": self._format_results(result), "raw": result},
+                    ensure_ascii=False,
+                )
             if tool_name == "zenos_memory_compact":
-                return json.dumps(self._request("POST", "/api/memory/compact", {
-                    "messages": args.get("messages", []),
-                    "namespace": args.get("namespace"),
-                    "reason": args.get("reason", "manual")
-                }), ensure_ascii=False)
-            if tool_name == "zenos_memory_bootstrap":
-                ns = args.get("namespace") or self._namespace
-                return json.dumps(self._request("POST", "/api/memory/bootstrap", {"namespace": ns}), ensure_ascii=False)
-            if tool_name == "zenos_memory_report":
-                ns = args.get("namespace") or self._namespace
-                return json.dumps(self._request("GET", "/api/memory/daily-report?namespace=" + _urlquote(ns)), ensure_ascii=False)
-            if tool_name == "zenos_memory_graph_query":
-                ns = args.get("namespace") or self._namespace
-                return json.dumps(self._request("POST", "/api/memory/graph-query", {"namespace": ns, "query": args.get("query", ""), "limit": int(args.get("limit", 10))}), ensure_ascii=False)
-            if tool_name == "zenos_memory_dashboard":
-                ns = args.get("namespace") or self._namespace
-                return json.dumps(self._request("GET", "/api/memory/dashboard?namespace=" + _urlquote(ns)), ensure_ascii=False)
-            if tool_name == "zenos_memory_mermaid":
-                ns = args.get("namespace") or self._namespace
-                return json.dumps({"success": True, "mermaid": self._request_text("GET", "/api/memory/graph-mermaid?namespace=" + _urlquote(ns))}, ensure_ascii=False)
+                messages = args.get("messages", [])
+                fingerprint = hashlib.sha256(
+                    json.dumps(messages[-160:], sort_keys=True, default=str).encode("utf-8")
+                ).hexdigest()[:32]
+                return json.dumps(
+                    self._request(
+                        "POST",
+                        "/api/memory/compact",
+                        {
+                            "messages": messages[-160:],
+                            "namespace": args.get("namespace") or self._namespace,
+                            "reason": args.get("reason", "manual"),
+                            "max_chars": 8000,
+                            "input_max_chars": 120000,
+                            "mode": "dag",
+                        },
+                        idempotency_key=f"hermes-manual-compact:{fingerprint}",
+                    ),
+                    ensure_ascii=False,
+                )
             return tool_error(f"Unknown Zenos Memory tool: {tool_name}")
-        except Exception as e:
-            return tool_error(str(e))
+        except Exception as exc:
+            return tool_error(str(exc))
 
     def shutdown(self) -> None:
-        for t in (self._prefetch_thread, self._sync_thread):
-            if t and t.is_alive():
-                t.join(timeout=2.0)
+        return
 
+    def _salient_memory(self, user_content: str) -> tuple[str, str, int] | None:
+        text = re.sub(r"\s+", " ", str(user_content or "")).strip()
+        if len(text) < 12 or len(text) > 2_000 or self._looks_like_credential(text):
+            return None
+        lowered = text.lower()
 
+        explicit_preference = re.search(
+            r"\b(aku|gue|saya)\s+(lebih\s+)?(suka|nggak suka|ga suka|gak suka|prefer|maunya)\b"
+            r"|\b(panggil aku|panggil gue|jangan pernah|selalu gunakan|always use|i prefer|i like|i dislike)\b",
+            lowered,
+        )
+        explicit_decision = re.search(
+            r"\b(kita putuskan|sudah diputuskan|finalnya|tetap pakai|lock keputusan|deal pakai|jadi kita pakai)\b"
+            r"|\b(final decision|we decided|keep using)\b",
+            lowered,
+        )
+        durable_task = (
+            re.search(r"\b(project|repo|service|deploy|bug|blocker|deadline|todo|milestone)\b", lowered)
+            and re.search(r"\b(lanjut|perbaiki|implementasi|selesaikan|target|harus|pending|blocked)\b", lowered)
+        )
+        stable_correction = (
+            re.search(r"\b(maksud gue|maksud aku|koreksi|yang benar|seharusnya)\b", lowered)
+            and re.search(r"\b(prefer|project|repo|service|pakai|gunakan|jangan|selalu)\b", lowered)
+        )
 
+        if explicit_preference:
+            return text, "preference", 9
+        if explicit_decision or stable_correction:
+            return text, "decision", 9
+        if durable_task:
+            return text, "task", 8
+        return None
 
     def _looks_like_credential(self, text: str) -> bool:
         if not text or len(text) < 10:
@@ -370,65 +418,62 @@ class ZenosMemoryProvider(MemoryProvider):
             r"ghp_[A-Za-z0-9]{30,}",
             r"AIza[0-9A-Za-z_-]{35}",
             r"AKIA[0-9A-Z]{16}",
-            r"[A-Za-z0-9]{32,}",
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+            r"\b(?:mnemonic|private[_ -]?key|api[_ -]?key|password|secret|token)\s*[:=]\s*\S+",
+            r"\b[A-Fa-f0-9]{64}\b",
         ]
-        for p in patterns:
-            if re.search(p, text):
-                return True
-        return False
-
-    def _auto_bootstrap(self):
-        try:
-            res = self._request("POST", "/api/memory/bootstrap", {
-                "namespace": self._namespace,
-                "limit": self._prefetch_limit
-            })
-            bootstrap = res.get("bootstrap", "")
-            if bootstrap:
-                with self._prefetch_lock:
-                    self._prefetch_result = "# Zenos Memory Bootstrap (auto)\n" + bootstrap
-        except Exception:
-            logger.debug("Zenos auto bootstrap failed", exc_info=True)
-
-    def _should_auto_compact(self, user_content: str, assistant_content: str, messages=None) -> bool:
-        total_chars = len(user_content or "") + len(assistant_content or "")
-        if messages:
-            total_chars = sum(len(str(m.get("content", ""))) for m in messages[-self._auto_compact_max_messages:])
-        periodic = self._auto_compact_every > 0 and self._turn_count % self._auto_compact_every == 0
-        return periodic or total_chars >= self._auto_compact_min_chars
+        return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
+        """Create one idempotent, coverage-checked checkpoint per compression window."""
         if not self._secret or not messages:
             return ""
+        message_count = len(messages)
+        if self._last_compact_message_count and message_count - self._last_compact_message_count < 12:
+            return ""
+        bounded = messages[-self._auto_compact_max_messages:]
+        input_chars = sum(len(str(message.get("content", ""))) for message in bounded)
+        approx_tokens = max(1, input_chars // 4)
+        if approx_tokens < 12_000:
+            return ""
+
+        fingerprint = hashlib.sha256(
+            json.dumps(bounded, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:32]
         try:
-            res = self._request("POST", "/api/memory/compact", {
-                "messages": messages[-self._auto_compact_max_messages:],
-                "namespace": self._namespace,
-                "reason": "hermes-pre-compress",
-                "approx_tokens": sum(len(str(m.get("content", ""))) for m in messages),
-            })
-            compact = res.get("compact") or res.get("summary") or res.get("handoff") or res.get("bootstrap") or ""
-            if compact:
-                return "Zenos Memory compact preserved before compression:\n" + str(compact)
+            result = self._request(
+                "POST",
+                "/api/memory/compact",
+                {
+                    "messages": bounded,
+                    "namespace": self._namespace,
+                    "reason": "hermes-pre-compress",
+                    "session_id": self._session_id,
+                    "approx_tokens": approx_tokens,
+                    "max_chars": 8000,
+                    "input_max_chars": 120000,
+                    "mode": "dag",
+                },
+                idempotency_key=f"hermes-pre-compress:{fingerprint}",
+            )
+            compact_value = result.get("compact")
+            compact = (
+                str(compact_value.get("content") or "")
+                if isinstance(compact_value, dict)
+                else str(compact_value or "")
+            ).strip()
+            coverage = result.get("coverage") or {}
+            if not compact or coverage.get("goal") is not True:
+                logger.warning("Zenos compact rejected: missing durable goal coverage")
+                return ""
+            if len(compact) > min(8000, max(2000, int(input_chars * 0.35))):
+                logger.warning("Zenos compact rejected: insufficient reduction ratio")
+                return ""
+            self._last_compact_message_count = message_count
+            return "Zenos Memory checkpoint preserved before compression:\n" + compact
         except Exception:
             logger.debug("Zenos pre-compress compact failed", exc_info=True)
         return ""
-
-    def _auto_compact(self, user_content: str, assistant_content: str, session_id: str = "", messages=None):
-        try:
-            compact_messages = messages[-self._auto_compact_max_messages:] if messages else [
-                {"role": "user", "content": user_content},
-                {"role": "assistant", "content": assistant_content[:4000]}
-            ]
-            self._request("POST", "/api/memory/compact", {
-                "messages": compact_messages,
-                "namespace": self._namespace,
-                "reason": "auto-compact",
-                "session_id": session_id,
-                "approx_tokens": sum(len(str(m.get("content", ""))) for m in compact_messages)
-            })
-        except Exception:
-            logger.debug("Zenos auto compact failed", exc_info=True)
 
 
 def register_memory_provider():

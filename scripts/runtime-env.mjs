@@ -41,7 +41,9 @@ function alias(target, ...sources) {
 }
 
 export function loadZenosRuntimeEnv(projectRoot = path.resolve(import.meta.dirname, '..')) {
+  const credentialDirectory = process.env.CREDENTIALS_DIRECTORY || '';
   for (const filename of [
+    credentialDirectory ? path.join(credentialDirectory, 'zenos-memory.env') : '',
     '/root/.hermes/profiles/zenos/.env',
     '/root/.hermes/.env',
     path.join(projectRoot, '.env.production.local'),

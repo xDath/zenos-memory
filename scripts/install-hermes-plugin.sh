@@ -5,37 +5,33 @@ PROFILE_NAME="${HERMES_PROFILE:-zenos}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes/profiles/$PROFILE_NAME}"
 PLUGIN_DIR="$HERMES_HOME/plugins/zenos-memory"
 CONFIG_FILE="$HERMES_HOME/zenos-memory.json"
-BASE_URL="${ZENOS_MEMORY_URL:-https://zenos-memory.vercel.app}"
+BASE_URL="${ZENOS_MEMORY_URL:-http://127.0.0.1:3091}"
 NAMESPACE="${ZENOS_MEMORY_NAMESPACE:-zenos}"
-PREFETCH_LIMIT="${ZENOS_MEMORY_PREFETCH_LIMIT:-5}"
-AUTO_COMPACT_EVERY="${ZENOS_MEMORY_AUTO_COMPACT_EVERY:-10}"
-AUTO_COMPACT_MIN_CHARS="${ZENOS_MEMORY_AUTO_COMPACT_MIN_CHARS:-6000}"
 AUTO_COMPACT_MAX_MESSAGES="${ZENOS_MEMORY_AUTO_COMPACT_MAX_MESSAGES:-80}"
 
 mkdir -p "$PLUGIN_DIR" "$HERMES_HOME"
 cp "$(dirname "$0")/../plugins/zenos-memory/__init__.py" "$PLUGIN_DIR/__init__.py"
 
-python3 - "$CONFIG_FILE" "$BASE_URL" "$NAMESPACE" "$PREFETCH_LIMIT" "$AUTO_COMPACT_EVERY" "$AUTO_COMPACT_MIN_CHARS" "$AUTO_COMPACT_MAX_MESSAGES" <<'PY'
+python3 - "$CONFIG_FILE" "$BASE_URL" "$NAMESPACE" "$AUTO_COMPACT_MAX_MESSAGES" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1]).expanduser()
 base_url, namespace = sys.argv[2], sys.argv[3]
-prefetch_limit, every, min_chars, max_messages = map(int, sys.argv[4:8])
+max_messages = int(sys.argv[4])
 
 try:
     data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 except Exception:
     data = {}
 
+for obsolete in ("prefetch_limit", "auto_compact_every", "auto_compact_min_chars"):
+    data.pop(obsolete, None)
 data.update({
     "base_url": base_url,
     "namespace": namespace,
-    "prefetch_limit": prefetch_limit,
-    "auto_compact_every": every,
-    "auto_compact_min_chars": min_chars,
-    "auto_compact_max_messages": max_messages,
+    "auto_compact_max_messages": max(20, min(max_messages, 160)),
 })
 
 secret = data.get("secret") or ""

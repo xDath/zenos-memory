@@ -1598,6 +1598,21 @@ export class MemoryEngine {
     return this.store.listLeases(normalized);
   }
 
+  async revision(namespace = process.env.ZENOS_MEMORY_DEFAULT_NAMESPACE || 'zenos', force = false) {
+    const normalized = normalizeNamespace(namespace);
+    await this.ensureReady(normalized, force);
+    const cloud = this.namespaceState.get(normalized);
+    if (cloud?.revision) return cloud.revision;
+    const latest = this.store.list({ namespace: normalized, limit: 1, includeArchived: true, includeDeleted: true })[0];
+    return createHash('sha256').update(JSON.stringify({
+      namespace: normalized,
+      count: this.store.count(normalized, true),
+      latestId: latest?.id || null,
+      latestUpdatedAt: latest?.updated_at || null,
+      latestStatus: latest?.metadata.status || null,
+    })).digest('hex');
+  }
+
   async readiness(namespace = process.env.ZENOS_MEMORY_DEFAULT_NAMESPACE || 'zenos') {
     const normalized = normalizeNamespace(namespace);
     await this.ensureReady(normalized, true);
