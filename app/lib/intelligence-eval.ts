@@ -194,6 +194,36 @@ export function runIntelligenceAmplificationEval() {
       'Encrypted secondary backups are stored on the VPS outside the Google Drive failure domain and verified after every write.',
       { type: 'project', importance: 9, tags: ['backup', 'encrypted', 'vps'] },
     ),
+    fixtureMemory(
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      'Production deployments retain exactly one active release and one verified rollback release; stale staging directories are removed.',
+      { type: 'procedure', importance: 9, tags: ['deployment', 'rollback', 'retention'] },
+    ),
+    fixtureMemory(
+      'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      'All provider credentials are delivered through encrypted systemd credentials. Plaintext environment copies must be removed and upstream keys rotated.',
+      { type: 'procedure', importance: 10, tags: ['security', 'credentials', 'systemd'] },
+    ),
+    fixtureMemory(
+      'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      'Gemini 3.1 Pro High performs high-value structured compaction while Gemini Flash is the economical semantic expansion fallback.',
+      { type: 'decision', importance: 10, tags: ['gemini', 'compaction', 'semantic'] },
+    ),
+    fixtureMemory(
+      'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      'The global token ledger charges uncached input, cache creation, and output separately while reporting cache-read tokens without double counting them.',
+      { type: 'insight', importance: 9, tags: ['token', 'cache', 'ledger'] },
+    ),
+    fixtureMemory(
+      'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      'User prefers concise Indonesian explanations that lead with the result and include concrete test evidence.',
+      { type: 'preference', importance: 10, tags: ['style', 'indonesian', 'evidence'] },
+    ),
+    fixtureMemory(
+      'ffffffff-ffff-4fff-8fff-ffffffffffff',
+      'Salient memory writes use a durable spool, an active thirty-second timer, idempotent batches, and retry after transient failure.',
+      { type: 'procedure', importance: 9, tags: ['salience', 'durability', 'batch'] },
+    ),
     unrelated,
   ];
   const personalMetrics = retrievalMetrics(personalCorpus, [
@@ -201,6 +231,14 @@ export function runIntelligenceAmplificationEval() {
     { query: 'berapa batas working context host dan target kompresinya?', relevant: ['77777777-7777-4777-8777-777777777777'] },
     { query: 'gimana caranya biar agent nggak lupa keputusan project?', relevant: ['88888888-8888-4888-8888-888888888888'] },
     { query: 'where is the encrypted secondary backup stored?', relevant: ['99999999-9999-4999-8999-999999999999'] },
+    { query: 'berapa release yang disimpan untuk rollback production?', relevant: ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'] },
+    { query: 'how are provider credentials delivered without plaintext env files?', relevant: ['bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'] },
+    { query: 'model apa yang melakukan compaction paling pintar?', relevant: ['cccccccc-cccc-4ccc-8ccc-cccccccccccc'] },
+    { query: 'which cheaper model handles semantic expansion?', relevant: ['cccccccc-cccc-4ccc-8ccc-cccccccccccc'] },
+    { query: 'apakah cache read dihitung dua kali di token ledger?', relevant: ['dddddddd-dddd-4ddd-8ddd-dddddddddddd'] },
+    { query: 'gaya jawaban seperti apa yang disukai user?', relevant: ['eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'] },
+    { query: 'what makes salient buffered writes survive a crash?', relevant: ['ffffffff-ffff-4fff-8fff-ffffffffffff'] },
+    { query: 'kapan batch memory otomatis di-flush?', relevant: ['ffffffff-ffff-4fff-8fff-ffffffffffff'] },
   ]);
 
   const relevantSimilarity = cosineSimilarity(
@@ -248,7 +286,7 @@ export function runIntelligenceAmplificationEval() {
     },
     {
       name: 'personal_bilingual_retrieval_metrics',
-      passed: personalMetrics.recall_at_1 >= 0.75
+      passed: personalMetrics.recall_at_1 >= 0.8
         && personalMetrics.recall_at_3 === 1
         && personalMetrics.mrr >= 0.85
         && personalMetrics.ndcg_at_3 >= 0.85,
@@ -259,14 +297,14 @@ export function runIntelligenceAmplificationEval() {
   const passed = cases.filter(item => item.passed).length;
   return {
     success: passed === cases.length,
-    benchmark: 'zenos-memory-personal-retrieval-regression-v2',
+    benchmark: 'zenos-memory-personal-retrieval-regression-v3',
     score: Number((passed / cases.length).toFixed(4)),
     passed,
     failed: cases.length - passed,
     cases,
     methodology: {
-      scope: 'deterministic contract plus bilingual personal-use retrieval regression',
-      claims: 'This validates invariants and retrieval metrics on a bounded noisy corpus; longitudinal evaluation on real user queries is still required.',
+      scope: 'deterministic contract plus twelve-query bilingual personal-use retrieval regression',
+      claims: 'This validates compaction, lifecycle, safety, and retrieval invariants on a bounded noisy corpus; longitudinal and public long-memory benchmarks remain separately required.',
       retrieval_provider: 'provider dense embeddings plus BM25-style sparse, graph, RRF, and lifecycle ranking with deterministic fallback',
     },
   };

@@ -16,6 +16,7 @@ BUILD_ID="$(tr -cd 'A-Za-z0-9._-' < .next/BUILD_ID | cut -c1-32)"
 [[ -n "${BUILD_ID}" ]] || BUILD_ID="build-$(date +%s)"
 RELEASE_ROOT="/opt/zenos-memory/releases/${VERSION}-${COMMIT}-${BUILD_ID}"
 STAGING="${RELEASE_ROOT}.staging"
+PREVIOUS_RELEASE="$(readlink -f /opt/zenos-memory/current 2>/dev/null || true)"
 SERVICE_USER="zenos-memory"
 SERVICE_GROUP="zenos-memory"
 
@@ -42,36 +43,26 @@ ln -sfn "${RELEASE_ROOT}" /opt/zenos-memory/current
 
 install -d -o root -g root -m 0700 /etc/credstore.encrypted
 CREDENTIAL_TMP="$(mktemp)"
+EXISTING_CREDENTIAL_TMP="$(mktemp)"
+RUNTIME_CREDENTIAL_TMP="$(mktemp)"
 cleanup() {
-  rm -f "${CREDENTIAL_TMP}"
+  rm -f "${CREDENTIAL_TMP}" "${EXISTING_CREDENTIAL_TMP}" "${RUNTIME_CREDENTIAL_TMP}"
 }
 trap cleanup EXIT
-python3 - "${CREDENTIAL_TMP}" "${SOURCE_ROOT}/.env.local" /root/.hermes/profiles/zenos/.env <<'PY'
-import re
-import sys
-from pathlib import Path
-
-output = Path(sys.argv[1])
-values: dict[str, str] = {}
-for filename in sys.argv[2:]:
-    path = Path(filename)
-    if not path.is_file():
-        continue
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        match = re.match(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line)
-        if not match:
-            continue
-        key = match.group(1)
-        value = match.group(2).strip()
-        current = values.get(key, '').strip().strip('"\'')
-        candidate = value.strip().strip('"\'')
-        if key not in values or (not current and candidate):
-            values[key] = value
-output.write_text("".join(f"{key}={value}\n" for key, value in sorted(values.items())), encoding="utf-8")
-PY
+if [[ -s /etc/credstore.encrypted/zenos-memory.env.cred ]]; then
+  systemd-creds decrypt --name=zenos-memory.env \
+    /etc/credstore.encrypted/zenos-memory.env.cred "${EXISTING_CREDENTIAL_TMP}" >/dev/null
+fi
+if [[ -s /etc/credstore.encrypted/zenos-runtime.env.cred ]]; then
+  systemd-creds decrypt --name=zenos-runtime.env \
+    /etc/credstore.encrypted/zenos-runtime.env.cred "${RUNTIME_CREDENTIAL_TMP}" >/dev/null
+fi
+node "${SOURCE_ROOT}/scripts/prepare-service-environment.mjs" \
+  "${CREDENTIAL_TMP}" \
+  "${SOURCE_ROOT}/.env.local" \
+  /root/.hermes/profiles/zenos/.env \
+  "${EXISTING_CREDENTIAL_TMP}" \
+  --runtime "${RUNTIME_CREDENTIAL_TMP}"
 if [[ ! -s "${CREDENTIAL_TMP}" ]]; then
   echo "No Zenos Memory credential source was found." >&2
   exit 1
@@ -88,5 +79,30 @@ HERMES_PROFILE=zenos ZENOS_MEMORY_URL=http://127.0.0.1:3091 \
 install -o root -g root -m 0644 "${SOURCE_ROOT}/deploy/zenos-memory.service" /etc/systemd/system/zenos-memory.service
 systemctl daemon-reload
 systemctl enable zenos-memory.service >/dev/null
-systemctl restart zenos-memory.service
+if ! systemctl restart zenos-memory.service; then
+  if [[ -n "${PREVIOUS_RELEASE}" && -d "${PREVIOUS_RELEASE}" ]]; then
+    ln -sfn "${PREVIOUS_RELEASE}" /opt/zenos-memory/current
+    systemctl restart zenos-memory.service || true
+  fi
+  echo "Zenos Memory deployment failed; restored the previous release." >&2
+  exit 1
+fi
+if [[ -n "${PREVIOUS_RELEASE}" && -d "${PREVIOUS_RELEASE}" && "${PREVIOUS_RELEASE}" != "${RELEASE_ROOT}" ]]; then
+  ln -sfn "${PREVIOUS_RELEASE}" /opt/zenos-memory/previous
+fi
+
+# Keep only the live release and one known-good rollback. This prevents a
+# successful deployment from copying dependency trees until the root disk is
+# exhausted again.
+CURRENT_RELEASE="$(readlink -f /opt/zenos-memory/current)"
+ROLLBACK_RELEASE="$(readlink -f /opt/zenos-memory/previous 2>/dev/null || true)"
+for candidate in /opt/zenos-memory/releases/*; do
+  [[ -d "${candidate}" ]] || continue
+  resolved="$(readlink -f "${candidate}")"
+  [[ "${resolved}" == "${CURRENT_RELEASE}" || "${resolved}" == "${ROLLBACK_RELEASE}" ]] && continue
+  case "${resolved}" in
+    /opt/zenos-memory/releases/*) rm -rf -- "${resolved}" ;;
+    *) echo "Refusing unsafe release cleanup target: ${resolved}" >&2; exit 1 ;;
+  esac
+done
 systemctl --no-pager --full status zenos-memory.service

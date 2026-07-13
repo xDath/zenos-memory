@@ -46,6 +46,24 @@ export interface MemoryLLMResult<T = unknown> {
   reasoning_tokens?: number;
   cache_read_tokens?: number;
   total_tokens?: number;
+  attempts?: MemoryLLMAttempt[];
+  fallback_used?: boolean;
+}
+
+export type MemoryLLMAttempt = {
+  model: string;
+  ok: boolean;
+  error?: string;
+  latency_ms?: number;
+};
+
+function attemptSummary(result: MemoryLLMResult<unknown>, model: string): MemoryLLMAttempt {
+  return {
+    model,
+    ok: result.ok,
+    ...(result.error ? { error: result.error } : {}),
+    ...(result.latency_ms !== undefined ? { latency_ms: result.latency_ms } : {}),
+  };
 }
 
 function stripJsonFence(text: string): string {
@@ -192,18 +210,28 @@ async function callWithFallback<T>(
 ): Promise<MemoryLLMResult<T>> {
   const primary = process.env.MEMORY_LLM_MODEL || '';
   const fallback = process.env.MEMORY_LLM_FALLBACK_MODEL || '';
-  if (!primary) return { ok: false, error: 'MEMORY_LLM_MODEL is not configured' };
+  if (!primary) return { ok: false, error: 'MEMORY_LLM_MODEL is not configured', attempts: [], fallback_used: false };
 
   const totalBudgetMs = Math.max(10_000, Math.min(Number(process.env.MEMORY_LLM_TOTAL_BUDGET_MS || 48_000), 52_000));
   const attemptBudgetMs = Math.max(5_000, Math.min(Number(process.env.MEMORY_LLM_TIMEOUT_MS || 22_000), 25_000));
   const started = Date.now();
   const result = await callModel(primary, messages, schema, Math.min(attemptBudgetMs, totalBudgetMs), maxTokens);
-  if (result.ok || !fallback || fallback === primary) return result;
+  const attempts = [attemptSummary(result, primary)];
+  if (result.ok || !fallback || fallback === primary) {
+    return { ...result, attempts, fallback_used: false };
+  }
   const remainingMs = totalBudgetMs - (Date.now() - started);
   if (remainingMs < 3_000) {
-    return { ...result, error: `${result.error || 'Primary model failed'}; fallback skipped because the function budget was exhausted` };
+    return {
+      ...result,
+      error: `${result.error || 'Primary model failed'}; fallback skipped because the function budget was exhausted`,
+      attempts,
+      fallback_used: false,
+    };
   }
-  return callModel(fallback, messages, schema, Math.min(attemptBudgetMs, remainingMs), maxTokens);
+  const fallbackResult = await callModel(fallback, messages, schema, Math.min(attemptBudgetMs, remainingMs), maxTokens);
+  attempts.push(attemptSummary(fallbackResult, fallback));
+  return { ...fallbackResult, attempts, fallback_used: true };
 }
 
 export async function extractWithLLM(text: string): Promise<MemoryLLMResult<ExtractionOutput>> {

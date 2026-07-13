@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -35,6 +36,12 @@ SPEC.loader.exec_module(PLUGIN)
 
 
 class ZenosMemoryPluginTests(unittest.TestCase):
+    def setUp(self):
+        self._temporary_directory = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._temporary_directory.cleanup()
+
     def provider(self):
         provider = PLUGIN.ZenosMemoryProvider()
         provider._secret = "configured-for-test"
@@ -42,6 +49,7 @@ class ZenosMemoryPluginTests(unittest.TestCase):
         provider._session_id = "session-test"
         provider._salience_batch_size = 2
         provider._salience_flush_seconds = 300
+        provider._salience_spool_path = Path(self._temporary_directory.name) / "salience-spool.json"
         return provider
 
     def test_cross_language_continuity_fingerprint(self):
@@ -97,6 +105,20 @@ class ZenosMemoryPluginTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(len(calls[0]["body"]["memories"]), 1)
         self.assertEqual(provider._salience_buffer, [])
+
+    def test_salience_spool_survives_process_memory_loss(self):
+        provider = self.provider()
+        provider._salience_batch_size = 4
+        provider.sync_turn("Aku suka jawaban yang menyertakan hasil test.", "", session_id="durable")
+        self.assertEqual(len(provider._salience_buffer), 1)
+
+        restarted = self.provider()
+        restarted._salience_buffer = restarted._load_salience_spool()
+        self.assertEqual(len(restarted._salience_buffer), 1)
+        self.assertEqual(
+            restarted._salience_buffer[0]["idempotency_key"],
+            provider._salience_buffer[0]["idempotency_key"],
+        )
 
 
 if __name__ == "__main__":

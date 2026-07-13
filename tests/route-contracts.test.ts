@@ -44,6 +44,7 @@ interface RouteBody {
   memory?: { id?: string; namespace?: string };
   compact?: { id?: string; content?: string };
   coverage?: { goal?: boolean; decisions?: boolean; pendingWork?: boolean; artifacts?: boolean };
+  llm_telemetry?: { configured?: boolean; succeeded?: boolean; failure_reason?: string | null; attempts?: unknown[] };
   bootstrap?: string;
   sources?: unknown[];
   request_id?: string;
@@ -82,7 +83,7 @@ test('public status is unauthenticated, no-store, and exposes the stable service
   assert.equal(response.headers.get('cache-control'), 'no-store');
   assert.equal(body.success, true);
   assert.equal(body.service, 'Zenos Memory');
-  assert.equal(body.version, '2.3.1');
+  assert.equal(body.version, '2.4.0');
   assert.equal(body.security?.raw_secret_storage, false);
   assert.equal(body.architecture?.canonical_store?.includes('Google Drive'), true);
 });
@@ -198,6 +199,10 @@ test('compact and bootstrap enforce read/write scopes and preserve bounded hando
   assert.equal(compactBody.coverage?.decisions, true);
   assert.equal(compactBody.coverage?.pendingWork, true);
   assert.equal(compactBody.coverage?.artifacts, true);
+  assert.equal(compactBody.llm_telemetry?.configured, false);
+  assert.equal(compactBody.llm_telemetry?.succeeded, false);
+  assert.match(String(compactBody.llm_telemetry?.failure_reason), /not configured/i);
+  assert.deepEqual(compactBody.llm_telemetry?.attempts, []);
   assert.ok(String(compactBody.compact?.content).length <= 4_000);
   assert.equal(bootstrap.status, 200);
   assert.equal(bootstrapBody.success, true);

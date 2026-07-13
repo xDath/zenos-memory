@@ -3,6 +3,7 @@ import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
 import {
   buildAdvancedCompactSnapshot,
   buildDagCompactSnapshot,
+  CompactRequest,
   CompactRequestSchema,
   normalizeContent,
 } from '../../../lib/compaction';
@@ -21,6 +22,15 @@ type CoverageReport = {
   questions: boolean;
   artifacts: boolean;
   complete: boolean;
+};
+
+type LlmTelemetry = {
+  configured: boolean;
+  succeeded: boolean;
+  fallback_used: boolean;
+  selected_model: string | null;
+  failure_reason: string | null;
+  attempts: Array<{ model: string; ok: boolean; error?: string; latency_ms?: number }>;
 };
 
 function stringList(value: unknown): string[] {
@@ -141,6 +151,30 @@ function structuredContent(blocks: Record<string, unknown>, maxChars: number): s
   return redactSensitiveText(sections.join('\n\n')).slice(0, maxChars);
 }
 
+function deterministicCoverage(
+  parsed: CompactRequest,
+  deterministic: ReturnType<typeof buildAdvancedCompactSnapshot>,
+): CoverageReport {
+  const source = buildAdvancedCompactSnapshot(parsed);
+  const candidate = deterministic.blocks;
+  const covered = (expected: unknown[] | undefined, actual: unknown[] | undefined) =>
+    (expected || []).length === 0 || (actual || []).length > 0;
+  const coverage: CoverageReport = {
+    goal: Boolean(lastUserGoal(parsed.messages)),
+    decisions: covered(source.blocks.decisions, candidate.decisions),
+    pendingWork: covered(source.blocks.tasks, candidate.tasks),
+    questions: covered(source.blocks.questions, candidate.questions),
+    artifacts: covered(source.blocks.artifacts, candidate.artifacts),
+    complete: false,
+  };
+  coverage.complete = coverage.goal
+    && coverage.decisions
+    && coverage.pendingWork
+    && coverage.questions
+    && coverage.artifacts;
+  return coverage;
+}
+
 export async function POST(request: NextRequest) {
   if (!validateApiKey(request)) return unauthorizedResponse();
   const id = requestId(request);
@@ -157,12 +191,28 @@ export async function POST(request: NextRequest) {
     let coverage: CoverageReport;
     let model: string | null = null;
     let llmUsage: Record<string, number> | null = null;
+    let llmTelemetry: LlmTelemetry = {
+      configured: hasMemoryLLM(),
+      succeeded: false,
+      fallback_used: false,
+      selected_model: null,
+      failure_reason: null,
+      attempts: [],
+    };
     let strategy: 'llm-structured-v2' | 'deterministic-structured-v3' | 'deterministic-dag-v3';
 
     if (hasMemoryLLM()) {
       // The deterministic snapshot remains the fallback/coverage source; do not
       // duplicate it inside the LLM prompt alongside the same raw transcript.
       const result = await compactWithLLM(conversationText);
+      llmTelemetry = {
+        configured: true,
+        succeeded: result.ok,
+        fallback_used: Boolean(result.fallback_used),
+        selected_model: result.ok ? result.model || null : null,
+        failure_reason: result.ok ? null : result.error || 'Memory LLM compaction failed',
+        attempts: result.attempts || [],
+      };
       if (result.ok && result.parsed) {
         const merged = mergeCoverage(
           sanitizeUnknown(result.parsed) as Record<string, unknown>,
@@ -185,27 +235,14 @@ export async function POST(request: NextRequest) {
         blocks = sanitizeUnknown(deterministic.blocks) as Record<string, unknown>;
         content = deterministic.content;
         strategy = parsed.mode === 'dag' ? 'deterministic-dag-v3' : 'deterministic-structured-v3';
-        coverage = {
-          goal: Boolean(lastUserGoal(parsed.messages)),
-          decisions: true,
-          pendingWork: true,
-          questions: true,
-          artifacts: true,
-          complete: Boolean(lastUserGoal(parsed.messages)),
-        };
+        coverage = deterministicCoverage(parsed, deterministic);
       }
     } else {
       blocks = sanitizeUnknown(deterministic.blocks) as Record<string, unknown>;
       content = deterministic.content;
       strategy = parsed.mode === 'dag' ? 'deterministic-dag-v3' : 'deterministic-structured-v3';
-      coverage = {
-        goal: Boolean(lastUserGoal(parsed.messages)),
-        decisions: true,
-        pendingWork: true,
-        questions: true,
-        artifacts: true,
-        complete: Boolean(lastUserGoal(parsed.messages)),
-      };
+      coverage = deterministicCoverage(parsed, deterministic);
+      llmTelemetry.failure_reason = 'Memory LLM is not configured';
     }
 
     if (!content.trim()) throw new Error('Compaction produced no durable content');
@@ -249,6 +286,7 @@ export async function POST(request: NextRequest) {
           artifacts: stringList(blocks.files_artifacts).length,
         },
         llm_usage: llmUsage,
+        llm_telemetry: llmTelemetry,
       },
       idempotency_key: request.headers.get('idempotency-key') || undefined,
     });
@@ -261,6 +299,7 @@ export async function POST(request: NextRequest) {
       strategy,
       model,
       llm_usage: llmUsage,
+      llm_telemetry: llmTelemetry,
       credentials_stored: 0,
       secret_policy: 'raw-secrets-rejected',
       request_id: id,

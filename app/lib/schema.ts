@@ -10,6 +10,7 @@ const NamespaceSchema = z
 export const MemoryTypeSchema = z.enum([
   'fact',
   'preference',
+  'decision',
   'event',
   'relationship',
   'insight',

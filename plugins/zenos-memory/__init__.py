@@ -15,6 +15,7 @@ import re
 import secrets
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, List
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
@@ -38,6 +39,10 @@ def _load_config() -> dict:
         "auto_compact_max_messages": int(os.environ.get("ZENOS_MEMORY_AUTO_COMPACT_MAX_MESSAGES", "80")),
         "salience_batch_size": int(os.environ.get("ZENOS_MEMORY_SALIENCE_BATCH_SIZE", "4")),
         "salience_flush_seconds": int(os.environ.get("ZENOS_MEMORY_SALIENCE_FLUSH_SECONDS", "30")),
+        "salience_spool_path": os.environ.get(
+            "ZENOS_MEMORY_SALIENCE_SPOOL_PATH",
+            str(get_hermes_home() / "state" / "zenos-memory-salience-spool.json"),
+        ),
     }
     path = get_hermes_home() / "zenos-memory.json"
     if path.exists():
@@ -117,6 +122,9 @@ class ZenosMemoryProvider(MemoryProvider):
         self._salience_buffer: list[dict] = []
         self._salience_lock = threading.Lock()
         self._last_salience_flush = time.monotonic()
+        self._salience_spool_path = Path("zenos-memory-salience-spool.json")
+        self._salience_stop = threading.Event()
+        self._salience_thread: threading.Thread | None = None
         self._token_cache: dict[str, tuple[str, float]] = {}
         self._token_lock = threading.Lock()
 
@@ -152,6 +160,7 @@ class ZenosMemoryProvider(MemoryProvider):
         ]
 
     def initialize(self, session_id: str, **kwargs) -> None:
+        self._stop_salience_timer()
         self._cfg = _load_config()
         self._base_url = str(self._cfg.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
         self._secret = str(self._cfg.get("secret") or "")
@@ -163,10 +172,52 @@ class ZenosMemoryProvider(MemoryProvider):
         )
         self._salience_batch_size = max(2, min(int(self._cfg.get("salience_batch_size") or 4), 8))
         self._salience_flush_seconds = max(5, min(int(self._cfg.get("salience_flush_seconds") or 30), 300))
+        self._salience_spool_path = Path(str(self._cfg.get("salience_spool_path") or "zenos-memory-salience-spool.json"))
         with self._salience_lock:
-            self._salience_buffer.clear()
+            self._salience_buffer = self._load_salience_spool()
         self._last_salience_flush = time.monotonic()
         self._last_compact_message_count = 0
+        self._start_salience_timer()
+
+    def _load_salience_spool(self) -> list[dict]:
+        try:
+            if not self._salience_spool_path.exists():
+                return []
+            raw = json.loads(self._salience_spool_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, list):
+                raise ValueError("salience spool must contain a JSON array")
+            return [item for item in raw if isinstance(item, dict)][:64]
+        except Exception:
+            logger.exception("Failed to load durable Zenos Memory salience spool")
+            return []
+
+    def _persist_salience_spool_locked(self) -> None:
+        path = self._salience_spool_path
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(self._salience_buffer, ensure_ascii=False), encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+
+    def _salience_timer_loop(self) -> None:
+        while not self._salience_stop.wait(self._salience_flush_seconds):
+            self._flush_salience_buffer(force=True)
+
+    def _start_salience_timer(self) -> None:
+        self._salience_stop = threading.Event()
+        self._salience_thread = threading.Thread(
+            target=self._salience_timer_loop,
+            name="zenos-memory-salience-flush",
+            daemon=True,
+        )
+        self._salience_thread.start()
+
+    def _stop_salience_timer(self) -> None:
+        self._salience_stop.set()
+        thread = self._salience_thread
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=2)
+        self._salience_thread = None
 
     def system_prompt_block(self) -> str:
         return (
@@ -303,6 +354,7 @@ class ZenosMemoryProvider(MemoryProvider):
                 return
             batch = self._salience_buffer[:32]
             del self._salience_buffer[:len(batch)]
+            self._persist_salience_spool_locked()
 
         digest = hashlib.sha256("\n".join(
             str(item.get("idempotency_key") or "") for item in batch
@@ -318,12 +370,14 @@ class ZenosMemoryProvider(MemoryProvider):
         except Exception:
             with self._salience_lock:
                 self._salience_buffer = (batch + self._salience_buffer)[:64]
+                self._persist_salience_spool_locked()
             logger.debug("Zenos Memory salient batch flush failed", exc_info=True)
 
     def _queue_salient_memory(self, item: dict) -> None:
         with self._salience_lock:
             if not any(existing.get("idempotency_key") == item.get("idempotency_key") for existing in self._salience_buffer):
                 self._salience_buffer.append(item)
+                self._persist_salience_spool_locked()
         self._flush_salience_buffer()
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "", messages=None) -> None:
@@ -365,7 +419,10 @@ class ZenosMemoryProvider(MemoryProvider):
                     "properties": {
                         "content": {"type": "string"},
                         "namespace": {"type": "string"},
-                        "type": {"type": "string"},
+                        "type": {
+                            "type": "string",
+                            "enum": ["fact", "preference", "decision", "event", "relationship", "insight", "file", "task", "project", "user_profile", "conversation", "procedure", "secret_reference", "custom"],
+                        },
                         "metadata": {"type": "object"},
                     },
                     "required": ["content"],
@@ -452,6 +509,7 @@ class ZenosMemoryProvider(MemoryProvider):
             return tool_error(str(exc))
 
     def shutdown(self) -> None:
+        self._stop_salience_timer()
         self._flush_salience_buffer(force=True)
 
     def _salient_memory(self, user_content: str) -> tuple[str, str, int] | None:
