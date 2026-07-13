@@ -294,10 +294,12 @@ test('semantic expansion batches large reindex jobs into bounded provider contra
   delete process.env.MEMORY_LLM_FALLBACK_MODEL;
   process.env.MEMORY_SEMANTIC_EXPANSION_ENABLED = 'true';
   const batchSizes: number[] = [];
+  const outputCaps: number[] = [];
   global.fetch = async (_input, init) => {
-    const body = JSON.parse(String(init?.body || '{}')) as { messages: Array<{ content: string }> };
+    const body = JSON.parse(String(init?.body || '{}')) as { messages: Array<{ content: string }>; max_tokens: number };
     const request = JSON.parse(body.messages[1].content) as { items: Array<{ index: number }> };
     batchSizes.push(request.items.length);
+    outputCaps.push(body.max_tokens);
     return Response.json({
       choices: [{
         message: {
@@ -312,6 +314,7 @@ test('semantic expansion batches large reindex jobs into bounded provider contra
   try {
     const results = await getEmbeddings(Array.from({ length: 45 }, (_, index) => `memory ${index}`));
     assert.deepEqual(batchSizes, [10, 10, 10, 10, 5]);
+    assert.deepEqual(outputCaps, [3_600, 3_600, 3_600, 3_600, 3_000]);
     assert.equal(results.length, 45);
     assert.equal(results.every(result => result.ok && result.provider === 'llm-semantic:semantic-primary'), true);
   } finally {
