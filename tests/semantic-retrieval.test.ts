@@ -311,7 +311,7 @@ test('semantic expansion batches large reindex jobs into bounded provider contra
 
   try {
     const results = await getEmbeddings(Array.from({ length: 45 }, (_, index) => `memory ${index}`));
-    assert.deepEqual(batchSizes, [20, 20, 5]);
+    assert.deepEqual(batchSizes, [10, 10, 10, 10, 5]);
     assert.equal(results.length, 45);
     assert.equal(results.every(result => result.ok && result.provider === 'llm-semantic:semantic-primary'), true);
   } finally {

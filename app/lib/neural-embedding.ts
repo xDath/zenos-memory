@@ -51,7 +51,7 @@ function semanticExpansionConfig() {
     ),
     totalBudgetMs: Math.max(
       8_000,
-      Math.min(Number(process.env.MEMORY_SEMANTIC_EXPANSION_TOTAL_BUDGET_MS || 28_000), 40_000),
+      Math.min(Number(process.env.MEMORY_SEMANTIC_EXPANSION_TOTAL_BUDGET_MS || 28_000), 45_000),
     ),
   };
 }
@@ -175,11 +175,12 @@ async function semanticExpansionEmbeddings(texts: string[]): Promise<{
   const results: EmbeddingResult[] = [];
   const attemptErrors: string[] = [];
   // One giant structured response is both token-wasteful and prone to Gemini
-  // reasoning/output truncation. Twenty items amortize provider framing while
+  // reasoning/output truncation. Ten items amortize provider framing while
   // keeping each JSON contract comfortably bounded.
-  for (let offset = 0; offset < texts.length; offset += 20) {
-    const chunk = texts.slice(offset, offset + 20);
+  for (let offset = 0; offset < texts.length; offset += 10) {
+    const chunk = texts.slice(offset, offset + 10);
     let expanded: EmbeddingResult[] | undefined;
+    const chunkErrors: string[] = [];
     for (const model of config.models) {
       const remainingMs = config.totalBudgetMs - (Date.now() - started);
       if (remainingMs < 3_000) break;
@@ -192,14 +193,22 @@ async function semanticExpansionEmbeddings(texts: string[]): Promise<{
         expanded = attempt.results;
         break;
       }
-      attemptErrors.push(`batch ${Math.floor(offset / 20) + 1} ${model}: ${attempt.error || 'failed'}`);
+      const detail = `batch ${Math.floor(offset / 10) + 1} ${model}: ${attempt.error || 'failed'}`;
+      attemptErrors.push(detail);
+      chunkErrors.push(detail);
     }
     if (!expanded) {
-      return { attempted: true, error: attemptErrors.join('; ') || 'Semantic expansion failed' };
+      const error = chunkErrors.join('; ') || 'Semantic expansion budget exhausted';
+      results.push(...chunk.map(text => deterministicResult(text, false, error)));
+      continue;
     }
     results.push(...expanded);
   }
-  return { attempted: true, results };
+  return {
+    attempted: true,
+    results,
+    ...(attemptErrors.length ? { error: attemptErrors.join('; ') } : {}),
+  };
 }
 
 function validVector(value: unknown): value is number[] {

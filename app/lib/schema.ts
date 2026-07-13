@@ -69,6 +69,7 @@ export const MemoryMetadataSchema = z
     embedding_dimensions: z.number().int().positive().max(4096).optional(),
     embedding_generated_at: z.string().datetime().optional(),
     embedding_degraded: z.boolean().optional(),
+    embedding_error: z.string().max(500).optional(),
     is_secret: z.boolean().default(false), // legacy compatibility only
   })
   .passthrough();

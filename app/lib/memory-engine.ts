@@ -109,6 +109,7 @@ function embeddingMetadata(result: EmbeddingResult): Partial<MemoryMetadata> {
     embedding_dimensions: result.dimensions,
     embedding_generated_at: new Date().toISOString(),
     embedding_degraded: !result.ok,
+    embedding_error: result.ok ? undefined : result.error?.slice(0, 500),
   };
 }
 
