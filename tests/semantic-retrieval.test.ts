@@ -185,12 +185,12 @@ test('LLM semantic expansion provides a shared semantic space when no dense prov
   global.fetch = async () => Response.json({
     choices: [{
       message: {
-        content: JSON.stringify({
-          items: [
-            { index: 0, semantic_text: 'production hosting region location singapore deployment' },
-            { index: 1, semantic_text: 'production hosting region location singapore deployment' },
-          ],
-        }),
+        content: `\`\`\`json
+${JSON.stringify([
+  { index: '0', semanticText: 'production hosting region location singapore deployment' },
+  { index: '1', representation: 'production hosting region location singapore deployment' },
+])}
+\`\`\``,
       },
     }],
   });
