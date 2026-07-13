@@ -34,7 +34,8 @@ function allowedMemoryKey(key) {
     || key.startsWith('MEMORY_SEMANTIC_EXPANSION_')
     || key.startsWith('GOOGLE_OAUTH_')
     || key.startsWith('GOOGLE_DRIVE_')
-    || key.startsWith('GOOGLE_SERVICE_ACCOUNT_');
+    || key.startsWith('GOOGLE_SERVICE_ACCOUNT_')
+    || ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN'].includes(key);
 }
 
 function unquoted(value = '') {
@@ -50,6 +51,21 @@ for (const filename of arguments_.slice(0, runtimeMarker)) {
 }
 
 const runtime = parseEnvironment(arguments_[runtimeMarker + 1]);
+const driveAliases = new Map([
+  ['GOOGLE_OAUTH_CLIENT_ID', ['GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_CLIENT_ID']],
+  ['GOOGLE_OAUTH_CLIENT_SECRET', ['GOOGLE_OAUTH_CLIENT_SECRET', 'GOOGLE_CLIENT_SECRET']],
+  ['GOOGLE_OAUTH_REFRESH_TOKEN', ['GOOGLE_OAUTH_REFRESH_TOKEN', 'GOOGLE_REFRESH_TOKEN']],
+]);
+for (const [canonical, aliases] of driveAliases) {
+  const candidate = aliases.map((key) => values.get(key) || runtime.get(key)).find((value) => unquoted(value));
+  if (candidate) values.set(canonical, candidate);
+  for (const alias of aliases) {
+    if (alias !== canonical) values.delete(alias);
+  }
+}
+if (!values.has('GOOGLE_DRIVE_FOLDER_NAME') && runtime.get('GOOGLE_DRIVE_FOLDER_NAME')) {
+  values.set('GOOGLE_DRIVE_FOLDER_NAME', runtime.get('GOOGLE_DRIVE_FOLDER_NAME'));
+}
 const routerKey = runtime.get('ZENOS_LLM_API_KEY') || runtime.get('LLM_API_KEY');
 if (unquoted(routerKey)) {
   Object.entries({

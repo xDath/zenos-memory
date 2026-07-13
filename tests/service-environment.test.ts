@@ -13,12 +13,14 @@ test('Memory service credential is least-privilege and maps the smartest Gemini 
     const output = path.join(directory, 'prepared.env');
     writeFileSync(memory, [
       'ZENOS_MEMORY_SECRET=memory-secret',
-      'GOOGLE_OAUTH_REFRESH_TOKEN=drive-token',
       'UNRELATED_PROVIDER_API_KEY=must-not-cross-boundary',
       'MEMORY_EMBEDDING_MODEL=existing-real-provider',
     ].join('\n'));
     writeFileSync(runtime, [
       'ZENOS_LLM_API_KEY=router-secret',
+      'GOOGLE_CLIENT_ID=drive-client',
+      'GOOGLE_CLIENT_SECRET=drive-secret',
+      'GOOGLE_REFRESH_TOKEN=drive-token',
       'ZENOS_RUNTIME_API_KEY=must-not-cross-boundary',
     ].join('\n'));
 
@@ -32,10 +34,13 @@ test('Memory service credential is least-privilege and maps the smartest Gemini 
     assert.equal(result.status, 0, result.stderr);
     const prepared = readFileSync(output, 'utf8');
     assert.match(prepared, /^ZENOS_MEMORY_SECRET=memory-secret$/m);
+    assert.match(prepared, /^GOOGLE_OAUTH_CLIENT_ID=drive-client$/m);
+    assert.match(prepared, /^GOOGLE_OAUTH_CLIENT_SECRET=drive-secret$/m);
     assert.match(prepared, /^GOOGLE_OAUTH_REFRESH_TOKEN=drive-token$/m);
     assert.match(prepared, /^MEMORY_LLM_API_KEY=router-secret$/m);
     assert.match(prepared, /^MEMORY_LLM_MODEL=ag\/gemini-pro-agent$/m);
     assert.match(prepared, /^MEMORY_SEMANTIC_EXPANSION_MODEL=ag\/gemini-3\.5-flash-low$/m);
+    assert.doesNotMatch(prepared, /^(?:GOOGLE_CLIENT_ID|GOOGLE_CLIENT_SECRET|GOOGLE_REFRESH_TOKEN)=/m);
     assert.doesNotMatch(prepared, /UNRELATED_PROVIDER|ZENOS_RUNTIME_API_KEY|must-not-cross-boundary/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
