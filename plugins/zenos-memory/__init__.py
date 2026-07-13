@@ -36,6 +36,8 @@ def _load_config() -> dict:
         "secret": os.environ.get("ETLA_MASTER_SECRET", ""),
         "namespace": os.environ.get("ZENOS_MEMORY_NAMESPACE", DEFAULT_NAMESPACE),
         "auto_compact_max_messages": int(os.environ.get("ZENOS_MEMORY_AUTO_COMPACT_MAX_MESSAGES", "80")),
+        "salience_batch_size": int(os.environ.get("ZENOS_MEMORY_SALIENCE_BATCH_SIZE", "4")),
+        "salience_flush_seconds": int(os.environ.get("ZENOS_MEMORY_SALIENCE_FLUSH_SECONDS", "30")),
     }
     path = get_hermes_home() / "zenos-memory.json"
     if path.exists():
@@ -45,6 +47,32 @@ def _load_config() -> dict:
         except Exception:
             logger.exception("Failed to load zenos-memory.json")
     return cfg
+
+
+def _stable_message_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if content is None:
+        return ""
+    if isinstance(content, list):
+        return "[" + ",".join(_stable_message_content(item) for item in content) + "]"
+    if isinstance(content, dict):
+        return "{" + ",".join(
+            f"{json.dumps(str(key), ensure_ascii=False)}:{_stable_message_content(content[key])}"
+            for key in sorted(content, key=lambda value: str(value))
+        ) + "}"
+    if isinstance(content, bool):
+        return "true" if content else "false"
+    return str(content)
+
+
+def _continuity_fingerprint(messages: list[dict], limit: int = 80) -> str:
+    bounded = messages[-max(1, min(limit, 80)):]
+    rendered = "\n---\n".join(
+        f"{str(message.get('role') or '').strip().lower()}\n{_stable_message_content(message.get('content'))}"
+        for message in bounded
+    )
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
 
 
 def _token_exchange_headers(secret: str, scopes: list[str], client_id: str = "hermes-zenos-memory") -> dict:
@@ -84,6 +112,11 @@ class ZenosMemoryProvider(MemoryProvider):
         self._session_id = ""
         self._auto_compact_max_messages = 80
         self._last_compact_message_count = 0
+        self._salience_batch_size = 4
+        self._salience_flush_seconds = 30
+        self._salience_buffer: list[dict] = []
+        self._salience_lock = threading.Lock()
+        self._last_salience_flush = time.monotonic()
         self._token_cache: dict[str, tuple[str, float]] = {}
         self._token_lock = threading.Lock()
 
@@ -128,6 +161,11 @@ class ZenosMemoryProvider(MemoryProvider):
             20,
             min(int(self._cfg.get("auto_compact_max_messages") or 80), 160),
         )
+        self._salience_batch_size = max(2, min(int(self._cfg.get("salience_batch_size") or 4), 8))
+        self._salience_flush_seconds = max(5, min(int(self._cfg.get("salience_flush_seconds") or 30), 300))
+        with self._salience_lock:
+            self._salience_buffer.clear()
+        self._last_salience_flush = time.monotonic()
         self._last_compact_message_count = 0
 
     def system_prompt_block(self) -> str:
@@ -250,34 +288,72 @@ class ZenosMemoryProvider(MemoryProvider):
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         return
 
+    def _flush_salience_buffer(self, *, force: bool = False) -> None:
+        if not self._secret:
+            return
+        now = time.monotonic()
+        with self._salience_lock:
+            if not self._salience_buffer:
+                return
+            if (
+                not force
+                and len(self._salience_buffer) < self._salience_batch_size
+                and now - self._last_salience_flush < self._salience_flush_seconds
+            ):
+                return
+            batch = self._salience_buffer[:32]
+            del self._salience_buffer[:len(batch)]
+
+        digest = hashlib.sha256("\n".join(
+            str(item.get("idempotency_key") or "") for item in batch
+        ).encode("utf-8")).hexdigest()
+        try:
+            self._request(
+                "POST",
+                "/api/memory/remember-batch",
+                {"memories": batch},
+                idempotency_key=f"hermes-salience-batch:{digest}",
+            )
+            self._last_salience_flush = time.monotonic()
+        except Exception:
+            with self._salience_lock:
+                self._salience_buffer = (batch + self._salience_buffer)[:64]
+            logger.debug("Zenos Memory salient batch flush failed", exc_info=True)
+
+    def _queue_salient_memory(self, item: dict) -> None:
+        with self._salience_lock:
+            if not any(existing.get("idempotency_key") == item.get("idempotency_key") for existing in self._salience_buffer):
+                self._salience_buffer.append(item)
+        self._flush_salience_buffer()
+
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "", messages=None) -> None:
-        """Persist only explicit durable user state on MemoryManager's serialized worker."""
+        """Buffer only explicit durable state; MemoryEngine persists it as one bounded batch."""
         if not self._secret or not user_content:
             return
         candidate = self._salient_memory(user_content)
         if candidate is None:
+            self._flush_salience_buffer()
             return
         content, memory_type, importance = candidate
         if self._looks_like_credential(content):
             logger.info("Zenos Memory skipped a credential-like turn; store secrets in an external vault")
             return
+        active_session = session_id or self._session_id
         digest = hashlib.sha256(
-            f"{session_id or self._session_id}\n{memory_type}\n{content}".encode("utf-8")
+            f"{active_session}\n{memory_type}\n{content}".encode("utf-8")
         ).hexdigest()[:32]
-        try:
-            self._remember(
-                content,
-                memory_type=memory_type,
-                metadata={
-                    "source": "hermes-salience-gate-v2",
-                    "session_id": session_id or self._session_id,
-                    "confidence": 0.94 if memory_type in {"preference", "decision"} else 0.86,
-                    "importance": importance,
-                },
-                idempotency_key=f"hermes-salience:{digest}",
-            )
-        except Exception:
-            logger.debug("Zenos Memory salient sync failed", exc_info=True)
+        self._queue_salient_memory({
+            "content": content,
+            "type": memory_type,
+            "namespace": self._namespace,
+            "metadata": {
+                "source": "hermes-salience-gate-v3-batch",
+                "session_id": active_session,
+                "confidence": 0.94 if memory_type in {"preference", "decision"} else 0.86,
+                "importance": importance,
+            },
+            "idempotency_key": f"hermes-salience:{digest}",
+        })
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [
@@ -349,23 +425,25 @@ class ZenosMemoryProvider(MemoryProvider):
                     ensure_ascii=False,
                 )
             if tool_name == "zenos_memory_compact":
-                messages = args.get("messages", [])
-                fingerprint = hashlib.sha256(
-                    json.dumps(messages[-160:], sort_keys=True, default=str).encode("utf-8")
-                ).hexdigest()[:32]
+                messages = list(args.get("messages", []))[-80:]
+                namespace = args.get("namespace") or self._namespace
+                fingerprint = _continuity_fingerprint(messages)
+                idempotency_digest = hashlib.sha256(
+                    f"{namespace}\n{fingerprint}".encode("utf-8")
+                ).hexdigest()
                 return json.dumps(
                     self._request(
                         "POST",
                         "/api/memory/compact",
                         {
-                            "messages": messages[-160:],
-                            "namespace": args.get("namespace") or self._namespace,
+                            "messages": messages,
+                            "namespace": namespace,
                             "reason": args.get("reason", "manual"),
                             "max_chars": 8000,
                             "input_max_chars": 120000,
                             "mode": "dag",
                         },
-                        idempotency_key=f"hermes-manual-compact:{fingerprint}",
+                        idempotency_key=f"continuity-compact:{idempotency_digest}",
                     ),
                     ensure_ascii=False,
                 )
@@ -374,7 +452,7 @@ class ZenosMemoryProvider(MemoryProvider):
             return tool_error(str(exc))
 
     def shutdown(self) -> None:
-        return
+        self._flush_salience_buffer(force=True)
 
     def _salient_memory(self, user_content: str) -> tuple[str, str, int] | None:
         text = re.sub(r"\s+", " ", str(user_content or "")).strip()
@@ -425,21 +503,23 @@ class ZenosMemoryProvider(MemoryProvider):
         return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
-        """Create one idempotent, coverage-checked checkpoint per compression window."""
+        """Create one shared idempotent, coverage-checked checkpoint per compression window."""
+        self._flush_salience_buffer(force=True)
         if not self._secret or not messages:
             return ""
         message_count = len(messages)
         if self._last_compact_message_count and message_count - self._last_compact_message_count < 12:
             return ""
-        bounded = messages[-self._auto_compact_max_messages:]
+        bounded = messages[-min(self._auto_compact_max_messages, 80):]
         input_chars = sum(len(str(message.get("content", ""))) for message in bounded)
         approx_tokens = max(1, input_chars // 4)
         if approx_tokens < 12_000:
             return ""
 
-        fingerprint = hashlib.sha256(
-            json.dumps(bounded, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()[:32]
+        fingerprint = _continuity_fingerprint(bounded)
+        idempotency_digest = hashlib.sha256(
+            f"{self._namespace}\n{fingerprint}".encode("utf-8")
+        ).hexdigest()
         try:
             result = self._request(
                 "POST",
@@ -454,7 +534,7 @@ class ZenosMemoryProvider(MemoryProvider):
                     "input_max_chars": 120000,
                     "mode": "dag",
                 },
-                idempotency_key=f"hermes-pre-compress:{fingerprint}",
+                idempotency_key=f"continuity-compact:{idempotency_digest}",
             )
             compact_value = result.get("compact")
             compact = (
