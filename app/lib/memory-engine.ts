@@ -1120,7 +1120,9 @@ export class MemoryEngine {
         namespace: normalized,
         limit: 10_000,
         includeArchived: false,
-      }).filter(memory => !SECRET_TYPES.has(memory.type) && memory.metadata.status === 'active');
+      }).filter(memory => !SECRET_TYPES.has(memory.type)
+        && memory.type !== 'conversation'
+        && memory.metadata.status === 'active');
       if (!active.length) return { updated: 0, space: 'empty', degraded: 0 };
       const probe = await getEmbedding('zenos semantic vector space probe');
       const candidates = active

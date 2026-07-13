@@ -47,11 +47,11 @@ function semanticExpansionConfig() {
     models: [...new Set([primaryModel, fallbackModel].filter(Boolean))],
     attemptTimeoutMs: Math.max(
       5_000,
-      Math.min(Number(process.env.MEMORY_SEMANTIC_EXPANSION_TIMEOUT_MS || 16_000), 25_000),
+      Math.min(Number(process.env.MEMORY_SEMANTIC_EXPANSION_TIMEOUT_MS || 12_000), 12_000),
     ),
     totalBudgetMs: Math.max(
       8_000,
-      Math.min(Number(process.env.MEMORY_SEMANTIC_EXPANSION_TOTAL_BUDGET_MS || 28_000), 45_000),
+      Math.min(Number(process.env.MEMORY_SEMANTIC_EXPANSION_TOTAL_BUDGET_MS || 60_000), 90_000),
     ),
   };
 }
@@ -175,10 +175,10 @@ async function semanticExpansionEmbeddings(texts: string[]): Promise<{
   const results: EmbeddingResult[] = [];
   const attemptErrors: string[] = [];
   // One giant structured response is both token-wasteful and prone to Gemini
-  // reasoning/output truncation. Ten items amortize provider framing while
+  // reasoning/output truncation. Five items amortize provider framing while
   // keeping each JSON contract comfortably bounded.
-  for (let offset = 0; offset < texts.length; offset += 10) {
-    const chunk = texts.slice(offset, offset + 10);
+  for (let offset = 0; offset < texts.length; offset += 5) {
+    const chunk = texts.slice(offset, offset + 5);
     let expanded: EmbeddingResult[] | undefined;
     const chunkErrors: string[] = [];
     for (const model of config.models) {
@@ -193,7 +193,7 @@ async function semanticExpansionEmbeddings(texts: string[]): Promise<{
         expanded = attempt.results;
         break;
       }
-      const detail = `batch ${Math.floor(offset / 10) + 1} ${model}: ${attempt.error || 'failed'}`;
+      const detail = `batch ${Math.floor(offset / 5) + 1} ${model}: ${attempt.error || 'failed'}`;
       attemptErrors.push(detail);
       chunkErrors.push(detail);
     }
