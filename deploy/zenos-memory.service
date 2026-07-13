@@ -1,0 +1,35 @@
+[Unit]
+Description=Zenos Memory personal sidecar
+After=network-online.target
+
+[Service]
+Type=simple
+User=zenos-memory
+Group=zenos-memory
+WorkingDirectory=/opt/zenos-memory/current
+EnvironmentFile=-/etc/zenos-memory/memory.env
+EnvironmentFile=-/etc/zenos-memory/profile.env
+Environment=HOME=/var/lib/zenos-memory
+Environment=NODE_ENV=production
+Environment=HOSTNAME=127.0.0.1
+Environment=PORT=3091
+Environment=ZENOS_MEMORY_STORAGE_MODE=drive-events
+Environment=ZENOS_MEMORY_DB_PATH=/var/lib/zenos-memory/zenos-memory.sqlite
+ExecStart=/usr/bin/node /opt/zenos-memory/current/scripts/load-env-and-start.mjs
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+KillSignal=SIGTERM
+KillMode=mixed
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/zenos-memory/current /etc/zenos-memory
+ReadWritePaths=/var/lib/zenos-memory
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
