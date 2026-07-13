@@ -24,6 +24,11 @@ id -u "${SERVICE_USER}" >/dev/null 2>&1 || useradd --system --gid "${SERVICE_GRO
 install -d -o root -g root -m 0755 /opt/zenos-memory /opt/zenos-memory/releases
 install -d -o root -g "${SERVICE_GROUP}" -m 0750 /etc/zenos-memory
 install -d -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" -m 0700 /var/lib/zenos-memory /var/cache/zenos-memory
+# Preserve existing state while migrating from the legacy root-run service to
+# the dedicated non-root identity. SQLite WAL/SHM files must share ownership.
+chown -R "${SERVICE_USER}:${SERVICE_GROUP}" /var/lib/zenos-memory /var/cache/zenos-memory
+find /var/lib/zenos-memory /var/cache/zenos-memory -xdev -type d -exec chmod 0700 {} +
+find /var/lib/zenos-memory /var/cache/zenos-memory -xdev -type f -exec chmod 0600 {} +
 
 rm -rf "${STAGING}"
 install -d -o root -g root -m 0755 "${STAGING}"
