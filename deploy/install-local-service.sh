@@ -52,10 +52,14 @@ install -d -o root -g root -m 0700 /etc/credstore.encrypted
 CREDENTIAL_TMP="$(mktemp)"
 EXISTING_CREDENTIAL_TMP="$(mktemp)"
 RUNTIME_CREDENTIAL_TMP="$(mktemp)"
+PREVIOUS_UNIT_TMP="$(mktemp)"
 cleanup() {
-  rm -f "${CREDENTIAL_TMP}" "${EXISTING_CREDENTIAL_TMP}" "${RUNTIME_CREDENTIAL_TMP}"
+  rm -f "${CREDENTIAL_TMP}" "${EXISTING_CREDENTIAL_TMP}" "${RUNTIME_CREDENTIAL_TMP}" "${PREVIOUS_UNIT_TMP}"
 }
 trap cleanup EXIT
+if [[ -s /etc/systemd/system/zenos-memory.service ]]; then
+  cp /etc/systemd/system/zenos-memory.service "${PREVIOUS_UNIT_TMP}"
+fi
 if [[ -s /etc/credstore.encrypted/zenos-memory.env.cred ]]; then
   systemd-creds decrypt --name=zenos-memory.env \
     /etc/credstore.encrypted/zenos-memory.env.cred "${EXISTING_CREDENTIAL_TMP}" >/dev/null
@@ -97,6 +101,10 @@ systemctl enable zenos-memory.service >/dev/null
 rollback_memory() {
   if [[ -n "${PREVIOUS_RELEASE}" && -d "${PREVIOUS_RELEASE}" ]]; then
     ln -sfn "${PREVIOUS_RELEASE}" /opt/zenos-memory/current
+    if [[ -s "${PREVIOUS_UNIT_TMP}" ]]; then
+      install -o root -g root -m 0644 "${PREVIOUS_UNIT_TMP}" /etc/systemd/system/zenos-memory.service
+      systemctl daemon-reload
+    fi
     systemctl restart zenos-memory.service || true
   fi
 }

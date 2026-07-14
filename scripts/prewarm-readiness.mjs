@@ -4,6 +4,8 @@ import path from 'node:path';
 import { loadZenosRuntimeEnv } from './runtime-env.mjs';
 
 const projectRoot = path.resolve(import.meta.dirname, '..');
+const credentialPath = process.argv[2]?.trim();
+if (credentialPath) process.env.CREDENTIALS_DIRECTORY = path.dirname(credentialPath);
 loadZenosRuntimeEnv(projectRoot);
 
 const secret = process.env.ETLA_MASTER_SECRET?.trim() || process.env.ZENOS_MEMORY_SECRET?.trim();
