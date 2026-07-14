@@ -15,7 +15,7 @@ export async function GET(request: NextRequest) {
     const engine = getMemoryEngine();
     const [readiness, memoryHealth] = await Promise.all([
       engine.readiness(namespace),
-      engine.memoryHealthCheck(namespace),
+      engine.memoryHealthCheck(namespace, { refresh: false }),
     ]);
     const ready = readiness.ready && readiness.backup.healthy && readiness.security.fail_closed;
     return jsonResponse({

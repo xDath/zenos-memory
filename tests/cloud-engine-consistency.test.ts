@@ -152,6 +152,25 @@ test('failed Drive append cannot leak a phantom write from a warm cache', async 
   }
 });
 
+test('warm readiness reuses the verified Drive materialization', async () => {
+  const context = cloudFixture();
+  try {
+    const first = await context.engine.readiness('readiness-cache');
+    const firstLoadCount = context.drive.loadCount;
+    const second = await context.engine.readiness('readiness-cache');
+    const health = await context.engine.memoryHealthCheck('readiness-cache', { refresh: false });
+
+    assert.equal(first.ready, true);
+    assert.equal(second.ready, true);
+    assert.equal(health.ok, true);
+    assert.equal(firstLoadCount, 1);
+    assert.equal(context.drive.loadCount, 1);
+    assert.equal(second.cloud?.readiness_strategy, 'cached-stale-while-revalidate');
+  } finally {
+    context.close();
+  }
+});
+
 test('cloud reads wait until an in-flight namespace write is durable', async () => {
   const context = cloudFixture();
   try {

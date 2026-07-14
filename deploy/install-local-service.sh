@@ -19,6 +19,13 @@ STAGING="${RELEASE_ROOT}.staging"
 PREVIOUS_RELEASE="$(readlink -f /opt/zenos-memory/current 2>/dev/null || true)"
 SERVICE_USER="zenos-memory"
 SERVICE_GROUP="zenos-memory"
+HERMES_SERVICE_USER="hermes"
+HERMES_PROFILE_ROOT="${ZENOS_HERMES_PROFILE_ROOT:-/var/lib/hermes/.hermes/profiles/zenos}"
+LEGACY_HERMES_PROFILE_ROOT="/root/.hermes/profiles/zenos"
+
+if [[ ! -d "${HERMES_PROFILE_ROOT}" && -d "${LEGACY_HERMES_PROFILE_ROOT}" ]]; then
+  HERMES_PROFILE_ROOT="${LEGACY_HERMES_PROFILE_ROOT}"
+fi
 
 getent group "${SERVICE_GROUP}" >/dev/null || groupadd --system "${SERVICE_GROUP}"
 id -u "${SERVICE_USER}" >/dev/null 2>&1 || useradd --system --gid "${SERVICE_GROUP}" --home-dir /var/lib/zenos-memory --shell /usr/sbin/nologin "${SERVICE_USER}"
@@ -60,7 +67,7 @@ fi
 node "${SOURCE_ROOT}/scripts/prepare-service-environment.mjs" \
   "${CREDENTIAL_TMP}" \
   "${SOURCE_ROOT}/.env.local" \
-  /root/.hermes/profiles/zenos/.env \
+  "${HERMES_PROFILE_ROOT}/.env" \
   "${EXISTING_CREDENTIAL_TMP}" \
   --runtime "${RUNTIME_CREDENTIAL_TMP}"
 if [[ ! -s "${CREDENTIAL_TMP}" ]]; then
@@ -74,8 +81,16 @@ systemd-creds encrypt --with-key=host --name=zenos-memory.env \
 chmod 0600 /etc/credstore.encrypted/zenos-memory.env.cred
 rm -f /etc/zenos-memory/memory.env /etc/zenos-memory/profile.env
 
-HERMES_PROFILE=zenos ZENOS_MEMORY_URL=http://127.0.0.1:3091 \
-  bash "${SOURCE_ROOT}/scripts/install-hermes-plugin.sh"
+if [[ "${HERMES_PROFILE_ROOT}" == /var/lib/hermes/* ]] && id -u "${HERMES_SERVICE_USER}" >/dev/null 2>&1; then
+  runuser -u "${HERMES_SERVICE_USER}" -- env \
+    HOME=/var/lib/hermes \
+    HERMES_HOME="${HERMES_PROFILE_ROOT}" \
+    ZENOS_MEMORY_URL=http://127.0.0.1:3091 \
+    bash "${SOURCE_ROOT}/scripts/install-hermes-plugin.sh"
+else
+  HERMES_HOME="${HERMES_PROFILE_ROOT}" ZENOS_MEMORY_URL=http://127.0.0.1:3091 \
+    bash "${SOURCE_ROOT}/scripts/install-hermes-plugin.sh"
+fi
 install -o root -g root -m 0644 "${SOURCE_ROOT}/deploy/zenos-memory.service" /etc/systemd/system/zenos-memory.service
 systemctl daemon-reload
 systemctl enable zenos-memory.service >/dev/null

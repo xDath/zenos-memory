@@ -120,6 +120,7 @@ export class MemoryEngine {
   private readonly cloudRefreshMs: number;
   private readonly namespaceState = new Map<string, { revision: string; loadedAt: number; cursor: string | null; eventCount: number }>();
   private readonly namespaceRefreshes = new Map<string, Promise<void>>();
+  private readonly readinessRefreshStartedAt = new Map<string, number>();
   private readonly namespaceWriteGates = new Map<string, Promise<void>>();
   private readonly writeContext = new AsyncLocalStorage<{
     namespace: string;
@@ -131,12 +132,17 @@ export class MemoryEngine {
     };
   }>();
   private readyPromise: Promise<void> | null = null;
+  private readonly readinessRefreshMs: number;
 
   constructor(options: { store?: SqliteMemoryStore; driveBackup?: GoogleDriveMemoryStore | null } = {}) {
     this.store = options.store || getSqliteStore();
     this.driveBackup = options.driveBackup === undefined ? createDriveStoreIfConfigured() : options.driveBackup;
     this.cloudMode = process.env.ZENOS_MEMORY_STORAGE_MODE === 'drive-events';
     this.cloudRefreshMs = Math.max(0, Number(process.env.ZENOS_MEMORY_CLOUD_REFRESH_MS || 1500));
+    this.readinessRefreshMs = Math.max(
+      5_000,
+      Number(process.env.ZENOS_MEMORY_READINESS_REFRESH_MS || 60_000),
+    );
     if (this.cloudMode && !this.driveBackup) {
       throw new StorageError('Drive event mode requires Google Drive OAuth or service-account configuration');
     }
@@ -1253,9 +1259,11 @@ export class MemoryEngine {
     };
   }
 
-  async memoryHealthCheck(namespace = 'zenos') {
+  async memoryHealthCheck(namespace = 'zenos', options: { refresh?: boolean } = {}) {
     const normalized = normalizeNamespace(namespace);
-    await this.ensureReady(normalized);
+    if (options.refresh !== false || !this.cloudMode || !this.namespaceState.has(normalized)) {
+      await this.ensureReady(normalized);
+    }
     const memories = this.store.list({ namespace: normalized, limit: 10_000, includeArchived: true })
       .filter(memory => !SECRET_TYPES.has(memory.type));
     const items = memories
@@ -1618,7 +1626,25 @@ export class MemoryEngine {
 
   async readiness(namespace = process.env.ZENOS_MEMORY_DEFAULT_NAMESPACE || 'zenos') {
     const normalized = normalizeNamespace(namespace);
-    await this.ensureReady(normalized, true);
+    // A cold instance verifies and materializes Drive synchronously once. Warm
+    // readiness probes serve the last verified materialization immediately and
+    // refresh it in the background. This keeps monitoring from turning every
+    // probe into a 10+ second Drive event scan while normal reads/writes retain
+    // their existing freshness and lease guarantees.
+    if (!this.namespaceState.has(normalized)) {
+      await this.ensureReady(normalized, true);
+    } else {
+      const state = this.namespaceState.get(normalized)!;
+      const refreshStartedAt = this.readinessRefreshStartedAt.get(normalized) || 0;
+      if (
+        Date.now() - state.loadedAt >= this.readinessRefreshMs
+        && Date.now() - refreshStartedAt >= this.readinessRefreshMs
+        && !this.namespaceRefreshes.has(normalized)
+      ) {
+        this.readinessRefreshStartedAt.set(normalized, Date.now());
+        void this.refreshCloudNamespace(normalized, true).catch(() => undefined);
+      }
+    }
     const storage = this.store.health();
     const cloud = this.namespaceState.get(normalized);
     const driveHealthy = this.cloudMode ? Boolean(this.driveBackup && cloud) : true;
@@ -1638,6 +1664,10 @@ export class MemoryEngine {
         cursor: cloud?.cursor || null,
         event_count: cloud?.eventCount || 0,
         revision: cloud?.revision || null,
+        last_verified_at: cloud ? new Date(cloud.loadedAt).toISOString() : null,
+        last_verified_age_ms: cloud ? Math.max(0, Date.now() - cloud.loadedAt) : null,
+        refresh_in_progress: this.namespaceRefreshes.has(normalized),
+        readiness_strategy: 'cached-stale-while-revalidate',
         coordination: 'google-drive-conditional-lease',
         snapshots: 'immutable-checksum-verified',
       } : null,
