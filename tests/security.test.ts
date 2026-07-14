@@ -92,6 +92,42 @@ test('v2 HMAC verifies before consuming nonce and token exchange rejects replay'
   }
 });
 
+test('single-replica cloud service keeps token nonce replay protection off the Drive hot path', async () => {
+  const secret = randomBytes(32).toString('hex');
+  const timestamp = Date.now();
+  const nonce = randomBytes(18).toString('base64url');
+  const bodyHash = sha256Body('');
+  const canonical = ['zenos-memory-signature-v2', timestamp, nonce, 'POST', '/api/auth', bodyHash].join('\n');
+  const request = new Request('http://127.0.0.1:3091/api/auth', {
+    method: 'POST',
+    headers: {
+      'x-etla-timestamp': String(timestamp),
+      'x-etla-nonce': nonce,
+      'x-etla-content-sha256': bodyHash,
+      'x-etla-signature': createHmac('sha256', secret).update(canonical).digest('hex'),
+    },
+  });
+  const previous = {
+    secret: process.env.ETLA_MASTER_SECRET,
+    mode: process.env.ZENOS_MEMORY_STORAGE_MODE,
+    nonceStore: process.env.ZENOS_MEMORY_AUTH_NONCE_STORE,
+  };
+  try {
+    process.env.ETLA_MASTER_SECRET = secret;
+    process.env.ZENOS_MEMORY_STORAGE_MODE = 'drive-events';
+    process.env.ZENOS_MEMORY_AUTH_NONCE_STORE = 'process';
+    assert.equal(await authenticateTokenExchange(request), true);
+    assert.equal(await authenticateTokenExchange(request), false);
+  } finally {
+    if (previous.secret === undefined) delete process.env.ETLA_MASTER_SECRET;
+    else process.env.ETLA_MASTER_SECRET = previous.secret;
+    if (previous.mode === undefined) delete process.env.ZENOS_MEMORY_STORAGE_MODE;
+    else process.env.ZENOS_MEMORY_STORAGE_MODE = previous.mode;
+    if (previous.nonceStore === undefined) delete process.env.ZENOS_MEMORY_AUTH_NONCE_STORE;
+    else process.env.ZENOS_MEMORY_AUTH_NONCE_STORE = previous.nonceStore;
+  }
+});
+
 test('production endpoints reject direct HMAC and require scoped bearer tokens', () => {
   const secret = randomBytes(32).toString('hex');
   const timestamp = Date.now();

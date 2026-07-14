@@ -17,6 +17,10 @@ BUILD_ID="$(tr -cd 'A-Za-z0-9._-' < .next/BUILD_ID | cut -c1-32)"
 RELEASE_ROOT="/opt/zenos-memory/releases/${VERSION}-${COMMIT}-${BUILD_ID}"
 STAGING="${RELEASE_ROOT}.staging"
 PREVIOUS_RELEASE="$(readlink -f /opt/zenos-memory/current 2>/dev/null || true)"
+RUNTIME_WAS_ACTIVE=false
+if systemctl is-active --quiet zenos-runtime.service; then
+  RUNTIME_WAS_ACTIVE=true
+fi
 SERVICE_USER="zenos-memory"
 SERVICE_GROUP="zenos-memory"
 HERMES_SERVICE_USER="hermes"
@@ -106,6 +110,9 @@ rollback_memory() {
       systemctl daemon-reload
     fi
     systemctl restart zenos-memory.service || true
+    if [[ "${RUNTIME_WAS_ACTIVE}" == "true" ]]; then
+      systemctl restart zenos-runtime.service || true
+    fi
   fi
 }
 if ! systemctl restart zenos-memory.service; then
@@ -126,6 +133,9 @@ if [[ "${MEMORY_READY}" != "true" ]]; then
   rollback_memory
   echo "Zenos Memory failed its post-restart HTTP health gate; restored the previous release." >&2
   exit 1
+fi
+if [[ "${RUNTIME_WAS_ACTIVE}" == "true" ]] && ! systemctl is-active --quiet zenos-runtime.service; then
+  systemctl restart zenos-runtime.service
 fi
 if [[ -n "${PREVIOUS_RELEASE}" && -d "${PREVIOUS_RELEASE}" && "${PREVIOUS_RELEASE}" != "${RELEASE_ROOT}" ]]; then
   ln -sfn "${PREVIOUS_RELEASE}" /opt/zenos-memory/previous

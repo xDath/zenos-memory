@@ -14,6 +14,7 @@ Environment=NODE_ENV=production
 Environment=HOSTNAME=127.0.0.1
 Environment=PORT=3091
 Environment=ZENOS_MEMORY_STORAGE_MODE=drive-events
+Environment=ZENOS_MEMORY_AUTH_NONCE_STORE=process
 Environment=ZENOS_MEMORY_DB_PATH=/var/lib/zenos-memory/zenos-memory.sqlite
 ExecStart=/usr/bin/node /opt/zenos-memory/current/scripts/load-env-and-start.mjs
 Restart=on-failure

@@ -232,7 +232,8 @@ export async function authenticateTokenExchange(request: Request): Promise<boole
 
   const nonce = request.headers.get('x-etla-nonce') || '';
   const cloudMode = process.env.ZENOS_MEMORY_STORAGE_MODE === 'drive-events';
-  if (cloudMode) {
+  const processNonceRegistry = process.env.ZENOS_MEMORY_AUTH_NONCE_STORE === 'process';
+  if (cloudMode && !processNonceRegistry) {
     const drive = createDriveStoreIfConfigured();
     if (!drive) return false;
     return drive.claimCloudNonce(nonce, NONCE_TTL_MS);
