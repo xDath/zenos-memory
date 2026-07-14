@@ -50,7 +50,6 @@ find "${STAGING}" -xdev -type f -exec chmod go-w {} +
 chown -R root:root "${STAGING}"
 rm -rf "${RELEASE_ROOT}"
 mv "${STAGING}" "${RELEASE_ROOT}"
-ln -sfn "${RELEASE_ROOT}" /opt/zenos-memory/current
 
 install -d -o root -g root -m 0700 /etc/credstore.encrypted
 CREDENTIAL_TMP="$(mktemp)"
@@ -115,6 +114,7 @@ rollback_memory() {
     fi
   fi
 }
+ln -sfn "${RELEASE_ROOT}" /opt/zenos-memory/current
 if ! systemctl restart zenos-memory.service; then
   rollback_memory
   echo "Zenos Memory deployment failed; restored the previous release." >&2
