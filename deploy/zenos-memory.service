@@ -15,7 +15,7 @@ Environment=PORT=3091
 Environment=ZENOS_MEMORY_STORAGE_MODE=drive-events
 Environment=ZENOS_MEMORY_DB_PATH=/var/lib/zenos-memory/zenos-memory.sqlite
 ExecStart=/usr/bin/node /opt/zenos-memory/current/scripts/load-env-and-start.mjs
-ExecStartPost=/usr/bin/node /opt/zenos-memory/current/scripts/prewarm-readiness.mjs %d/zenos-memory.env
+ExecStartPost=/usr/bin/node /opt/zenos-memory/current/scripts/prewarm-readiness.mjs /run/credentials/zenos-memory.service/zenos-memory.env
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=30
