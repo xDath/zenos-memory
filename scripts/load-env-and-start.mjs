@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { existsSync } from 'node:fs';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
+import { prewarmReadiness } from './prewarm-readiness.mjs';
 import { loadZenosRuntimeEnv } from './runtime-env.mjs';
 
 const projectRoot = path.resolve(import.meta.dirname, '..');
@@ -28,6 +29,7 @@ const child = spawn(process.execPath, [server], {
 });
 
 let shutdownSignal = '';
+let shutdownExitCode = 0;
 let shutdownTimer;
 function signalChildTree(signal) {
   if (!child.pid || child.killed) return;
@@ -50,7 +52,25 @@ for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
 
 child.on('exit', (code, signal) => {
   if (shutdownTimer) clearTimeout(shutdownTimer);
-  if (shutdownSignal) process.exit(0);
+  if (shutdownSignal) process.exit(shutdownExitCode);
   if (signal) process.kill(process.pid, signal);
   else process.exit(code ?? 1);
 });
+
+if (process.env.NOTIFY_SOCKET) {
+  void prewarmReadiness().then(() => {
+    const notified = spawnSync('/usr/bin/systemd-notify', [
+      '--ready',
+      '--status=Drive materialization verified; Zenos Memory ready',
+    ], { env: process.env, stdio: 'inherit' });
+    if (notified.status !== 0) throw new Error(`systemd-notify exited with status ${notified.status}`);
+    process.stdout.write('Zenos Memory Drive readiness cache prewarmed\n');
+  }).catch(error => {
+    process.stderr.write(`Zenos Memory startup readiness failed: ${error instanceof Error ? error.message : 'unknown error'}\n`);
+    shutdownSignal = 'startup-readiness-failed';
+    shutdownExitCode = 1;
+    signalChildTree('SIGTERM');
+    shutdownTimer = setTimeout(() => signalChildTree('SIGKILL'), 5_000);
+    shutdownTimer.unref();
+  });
+}

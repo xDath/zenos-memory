@@ -3,7 +3,8 @@ Description=Zenos Memory personal sidecar
 After=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=all
 User=zenos-memory
 Group=zenos-memory
 WorkingDirectory=/opt/zenos-memory/current
@@ -15,9 +16,9 @@ Environment=PORT=3091
 Environment=ZENOS_MEMORY_STORAGE_MODE=drive-events
 Environment=ZENOS_MEMORY_DB_PATH=/var/lib/zenos-memory/zenos-memory.sqlite
 ExecStart=/usr/bin/node /opt/zenos-memory/current/scripts/load-env-and-start.mjs
-ExecStartPost=/usr/bin/node /opt/zenos-memory/current/scripts/prewarm-readiness.mjs /run/credentials/zenos-memory.service/zenos-memory.env
 Restart=on-failure
 RestartSec=3
+TimeoutStartSec=60
 TimeoutStopSec=30
 KillSignal=SIGTERM
 KillMode=mixed
