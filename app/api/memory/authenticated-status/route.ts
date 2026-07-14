@@ -15,15 +15,16 @@ export async function POST(request: NextRequest) {
     const namespace = typeof body.namespace === 'string' && body.namespace.trim()
       ? body.namespace.trim().slice(0, 120)
       : process.env.ZENOS_MEMORY_DEFAULT_NAMESPACE || 'zenos';
-    // A bounded read proves authentication and the canonical storage path are
-    // usable without exposing private memory content.
-    const memories = await getMemoryEngine().list(namespace, 1);
+    // The verified materialization is already refreshed by normal traffic and
+    // service-start readiness. Probe the local canonical view here without
+    // turning every Runtime health check into another synchronous Drive scan.
+    const health = await getMemoryEngine().memoryHealthCheck(namespace, { refresh: false });
     return jsonResponse({
       success: true,
       authenticated: true,
-      storage_readable: true,
+      storage_readable: health.storage.ok,
       namespace,
-      visible_count_at_least: memories.length,
+      visible_count_at_least: health.total,
       request_id: id,
     }, { requestId: id });
   } catch (error) {
