@@ -25,7 +25,7 @@ from tools.registry import tool_error
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BASE_URL = "http://127.0.0.1:3091"
+DEFAULT_BASE_URL = "https://zenos-memory.vercel.app"
 DEFAULT_NAMESPACE = "zenos"
 
 

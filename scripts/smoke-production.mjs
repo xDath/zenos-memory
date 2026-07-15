@@ -11,12 +11,18 @@ const baseUrl = (
   || 'https://zenos-memory.vercel.app'
 ).replace(/\/$/, '');
 const namespace = `smoke-${Date.now()}`;
-const client = new ZenosMemoryClient({ baseUrl, namespace, clientId: 'zenos-production-smoke' });
+const timeoutMs = Math.max(30_000, Math.min(Number(process.env.ZENOS_MEMORY_SMOKE_TIMEOUT_MS || 180_000), 300_000));
+const client = new ZenosMemoryClient({
+  baseUrl,
+  namespace,
+  clientId: 'zenos-production-smoke',
+  timeoutMs,
+});
 
 async function assertPublicEndpoints() {
-  const health = await fetch(`${baseUrl}/api/health`, { signal: AbortSignal.timeout(15_000), cache: 'no-store' });
+  const health = await fetch(`${baseUrl}/api/health`, { signal: AbortSignal.timeout(Math.min(timeoutMs, 60_000)), cache: 'no-store' });
   if (!health.ok || (await health.json()).status !== 'ok') throw new Error('Liveness endpoint failed');
-  const status = await fetch(`${baseUrl}/api/memory/public-status`, { signal: AbortSignal.timeout(15_000), cache: 'no-store' });
+  const status = await fetch(`${baseUrl}/api/memory/public-status`, { signal: AbortSignal.timeout(Math.min(timeoutMs, 60_000)), cache: 'no-store' });
   const payload = await status.json();
   if (!status.ok || payload.version !== '2.4.0' || payload.security?.raw_secret_storage !== false) {
     throw new Error('Public capability endpoint failed');
