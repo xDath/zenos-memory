@@ -32,7 +32,7 @@ Google Drive (canonical, user-owned)
 
 ## Retrieval intelligence
 
-Zenos Memory 2.3 uses a retrieval pipeline that keeps storage correctness independent from model availability:
+Zenos Memory 2.5 uses a retrieval pipeline that keeps storage correctness independent from model availability:
 
 1. provider-backed dense embeddings are generated during writes and stored with an explicit model-and-dimension vector-space identifier;
 2. queries are embedded in the same vector space, and vectors from different models or dimensions are never compared;
@@ -173,9 +173,11 @@ https://zenos-memory.vercel.app
 
 ## Context continuity contract
 
-Compaction accepts a large but explicitly bounded source transcript (`input_max_chars`, up to 500,000 characters) while keeping the durable handoff independently bounded (`max_chars`, up to 24,000 characters). Long inputs preserve a small conversation head and the recent tail instead of keeping only the beginning.
+Compaction accepts a large but explicitly bounded source transcript (`input_max_chars`, up to 500,000 characters) while keeping the durable handoff independently bounded (`max_chars`, up to 24,000 characters). Long inputs are scanned across the whole transcript: stable evidence anchors preserve the durable goal plus high-signal decisions, tasks, failures, constraints, questions, and artifacts from the middle as well as the head and recent tail.
 
-The response reports coverage for the active goal, decisions, pending work, open questions, and files/artifacts. Deterministic extraction fills missing LLM fields, and the raw transcript remains outside Memory as the canonical evidence source.
+The response reports source-message and category coverage alongside the active goal, decisions, pending work, open questions, and files/artifacts. Deterministic extraction fills missing LLM fields, session/conversation-scoped compacts supersede only their own prior handoffs, and the raw transcript remains outside Memory as the canonical evidence source.
+
+Runtime recall is compiled into a task-specific Cognitive Brief rather than a flat search dump. Records are grouped into current project state, active tasks, prior decisions, procedures, failures, preferences, and facts, with explicit source/confidence metadata and an instruction-injection boundary.
 
 ## Hermes integration
 

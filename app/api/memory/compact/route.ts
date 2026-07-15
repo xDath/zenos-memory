@@ -2,10 +2,11 @@ import { NextRequest } from 'next/server';
 import { unauthorizedResponse, validateApiKey } from '../../../lib/auth';
 import {
   buildAdvancedCompactSnapshot,
+  buildCompactionEvidencePacket,
   buildDagCompactSnapshot,
   CompactRequest,
   CompactRequestSchema,
-  normalizeContent,
+  selectDurableUserGoal,
 } from '../../../lib/compaction';
 import { errorResponse, requestId } from '../../../lib/errors';
 import { getMemoryEngine } from '../../../lib/memory-engine';
@@ -55,33 +56,14 @@ function mergeLists(primary: unknown, fallback: string[] | undefined, max = 18):
   return merged;
 }
 
-function lastUserGoal(messages: Array<{ role: string; content?: unknown }>): string {
-  for (const message of [...messages].reverse()) {
-    if (String(message.role).toLowerCase() !== 'user') continue;
-    const text = normalizeContent(message.content).replace(/\s+/g, ' ').trim();
-    if (text) return text.slice(0, 2_000);
-  }
-  return '';
-}
-
-function boundedConversationText(
-  messages: Array<{ role: string; content?: unknown }>,
-  maxChars: number,
-): string {
-  const rendered = messages
-    .map((message) => `${message.role}: ${normalizeContent(message.content)}`)
-    .join('\n\n');
-  if (rendered.length <= maxChars) return rendered;
-  const headChars = Math.max(4_000, Math.floor(maxChars * 0.18));
-  const marker = '\n\n[OLDER LOW-SIGNAL CONTEXT OMITTED; RECENT CONTEXT FOLLOWS]\n\n';
-  const tailChars = Math.max(8_000, maxChars - headChars - marker.length);
-  return `${rendered.slice(0, headChars).trimEnd()}${marker}${rendered.slice(-tailChars).trimStart()}`;
+function lastUserGoal(messages: CompactRequest['messages']): string {
+  return selectDurableUserGoal(messages);
 }
 
 function mergeCoverage(
   rawBlocks: Record<string, unknown>,
   fallback: ReturnType<typeof buildAdvancedCompactSnapshot>,
-  messages: Array<{ role: string; content?: unknown }>,
+  messages: CompactRequest['messages'],
 ): { blocks: Record<string, unknown>; coverage: CoverageReport } {
   const blocks: Record<string, unknown> = {
     ...rawBlocks,
@@ -184,7 +166,11 @@ export async function POST(request: NextRequest) {
     const deterministic = parsed.mode === 'dag'
       ? buildDagCompactSnapshot(parsed)
       : buildAdvancedCompactSnapshot(parsed);
-    const conversationText = boundedConversationText(parsed.messages, parsed.input_max_chars || 120_000);
+    const evidencePacket = buildCompactionEvidencePacket(
+      parsed.messages,
+      Math.min(parsed.input_max_chars || 120_000, 60_000),
+    );
+    const conversationText = evidencePacket.text;
 
     let content: string;
     let blocks: Record<string, unknown>;
@@ -247,13 +233,24 @@ export async function POST(request: NextRequest) {
 
     if (!content.trim()) throw new Error('Compaction produced no durable content');
     const engine = getMemoryEngine();
-    const previousCompacts = (await engine.list(namespace, 100))
-      .filter((item) => {
-        const tags = item.metadata.tags || [];
-        return tags.includes('compact') || tags.includes('structured-handoff') || tags.includes('dag-compact');
-      })
-      .slice(0, 20)
-      .map((item) => item.id);
+    const compactionScope = parsed.session_id
+      ? `session:${parsed.session_id}`
+      : parsed.conversation_id
+        ? `conversation:${parsed.conversation_id}`
+        : null;
+    const previousCompacts = compactionScope
+      ? (await engine.list(namespace, 250))
+          .filter((item) => {
+            const tags = item.metadata.tags || [];
+            if (!(tags.includes('compact') || tags.includes('structured-handoff') || tags.includes('dag-compact'))) return false;
+            const provenance = item.metadata.provenance;
+            return parsed.session_id
+              ? provenance?.session_id === parsed.session_id
+              : provenance?.conversation_id === parsed.conversation_id;
+          })
+          .slice(0, 20)
+          .map((item) => item.id)
+      : [];
     const memory = await engine.remember({
       content,
       type: 'insight',
@@ -272,8 +269,20 @@ export async function POST(request: NextRequest) {
         message_count: parsed.messages.length,
         approx_tokens: parsed.approx_tokens,
         input_chars: conversationText.length,
+        source_input_chars: evidencePacket.sourceChars,
         output_chars: content.length,
+        source_coverage: {
+          source_messages: evidencePacket.sourceMessages,
+          selected_messages: evidencePacket.selectedMessages,
+          omitted_messages: evidencePacket.omittedMessages,
+          selected_chars: evidencePacket.selectedChars,
+          category_counts: evidencePacket.categoryCounts,
+          selected_category_counts: evidencePacket.selectedCategoryCounts,
+          category_coverage: evidencePacket.categoryCoverage,
+          evidence_anchors: evidencePacket.anchors,
+        },
         reason: parsed.reason,
+        compaction_scope: compactionScope,
         compact_strategy: strategy,
         coverage,
         block_counts: {
@@ -300,6 +309,14 @@ export async function POST(request: NextRequest) {
       model,
       llm_usage: llmUsage,
       llm_telemetry: llmTelemetry,
+      source_coverage: {
+        source_messages: evidencePacket.sourceMessages,
+        selected_messages: evidencePacket.selectedMessages,
+        omitted_messages: evidencePacket.omittedMessages,
+        source_chars: evidencePacket.sourceChars,
+        selected_chars: evidencePacket.selectedChars,
+        category_coverage: evidencePacket.categoryCoverage,
+      },
       credentials_stored: 0,
       secret_policy: 'raw-secrets-rejected',
       request_id: id,

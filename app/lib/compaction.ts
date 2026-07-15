@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { Memory } from './schema';
 import { redactSensitiveText as redactSecrets } from './secrets';
@@ -58,6 +59,181 @@ export function normalizeContent(content: unknown): string {
     try { return redactSensitiveText(JSON.stringify(content)); } catch { return redactSensitiveText(String(content)); }
   }
   return redactSensitiveText(String(content ?? ''));
+}
+
+const CONTINUATION_ONLY = /^(?:g+a+s+|lanjut(?:kan)?|continue|coba lagi|ulang|terusin|next|udah|sudah|cek lagi|go)(?:\s+(?:dong|aja|dulu|ya|lah))?[.!?]*$/i;
+const GOAL_SIGNAL = /\b(?:buat|bikin|fix|perbaiki|implement|upgrade|audit|deploy|ubah|tambahkan|hapus|selesaikan|kerjakan|build|debug|investigate|tujuan|goal|harus|pengen|mau)\b/i;
+const EVIDENCE_SIGNALS: Record<string, RegExp> = {
+  decision: /\b(?:decision|decided|final|approved|confirmed|pilih|pakai|gunakan|diputuskan|keputusan)\b/i,
+  task: /\b(?:todo|pending|next|lanjut|fix|implement|deploy|push|test|bikin|tambahkan|upgrade|repair|rollback|blocker)\b/i,
+  question: /[?？]|\b(?:kenapa|gimana|apakah|belum|masih|bisa ga|cek sekalian|unknown|open question)\b/i,
+  artifact: /(?:\/srv\/|\/root\/|app\/|api\/|scripts\/|\.tsx?\b|\.py\b|\.json\b|vercel|github|drive|endpoint|service\b|env\b)/i,
+  failure: /\b(?:error|failed|failure|timeout|denied|broken|invalid|regression|bug|crash|ngadat|gagal|rusak)\b/i,
+  constraint: /\b(?:must|must not|do not|never|always|jangan|harus|wajib|tanpa|only|hanya)\b/i,
+};
+
+export type CompactionEvidencePacket = {
+  text: string;
+  currentGoal: string;
+  sourceMessages: number;
+  selectedMessages: number;
+  omittedMessages: number;
+  sourceChars: number;
+  selectedChars: number;
+  anchors: string[];
+  categoryCounts: Record<string, number>;
+  selectedCategoryCounts: Record<string, number>;
+  categoryCoverage: Record<string, number>;
+};
+
+type CompactionEntry = {
+  index: number;
+  role: string;
+  text: string;
+  anchor: string;
+  categories: string[];
+  score: number;
+};
+
+function compactionEntries(messages: CompactRequest['messages']): CompactionEntry[] {
+  const total = Math.max(1, messages.length);
+  return messages.map((message, index) => {
+    const role = String(message.role || 'unknown').toLowerCase();
+    const text = normalizeContent(message.content).replace(/\s+/g, ' ').trim();
+    const categories = Object.entries(EVIDENCE_SIGNALS)
+      .filter(([, pattern]) => pattern.test(text))
+      .map(([name]) => name);
+    const recentness = index / total;
+    const score = categories.length * 3
+      + (role === 'user' ? 1.5 : role === 'tool' ? 1.2 : 0.5)
+      + (GOAL_SIGNAL.test(text) ? 2.5 : 0)
+      + recentness * 1.5;
+    const fingerprint = createHash('sha256').update(`${role}\n${text}`).digest('hex').slice(0, 12);
+    return { index, role, text, anchor: `m${index}:${role}:${fingerprint}`, categories, score };
+  }).filter((entry) => Boolean(entry.text));
+}
+
+export function selectDurableUserGoal(messages: CompactRequest['messages']): string {
+  const candidates: Array<{ index: number; text: string }> = [];
+  for (const [index, message] of messages.entries()) {
+    if (String(message.role || '').toLowerCase() !== 'user') continue;
+    const text = normalizeContent(message.content).replace(/\s+/g, ' ').trim();
+    if (!text || CONTINUATION_ONLY.test(text)) continue;
+    candidates.push({ index, text });
+  }
+  if (!candidates.length) return '';
+
+  const explicitGoal = [...candidates]
+    .reverse()
+    .find((candidate) => GOAL_SIGNAL.test(candidate.text));
+  if (explicitGoal) return explicitGoal.text.slice(0, 2_000);
+
+  const scored = candidates
+    .map((candidate) => ({
+      ...candidate,
+      score: Math.min(candidate.text.length, 800)
+        + (/[?？]/.test(candidate.text) ? 80 : 0)
+        + candidate.index / Math.max(1, messages.length),
+    }))
+    .sort((left, right) => right.score - left.score || right.index - left.index)[0];
+  return scored.text.slice(0, 2_000);
+}
+
+function renderEvidenceEntries(entries: CompactionEntry[]): string {
+  const ordered = [...entries].sort((left, right) => left.index - right.index);
+  const lines: string[] = [];
+  let previous = -1;
+  for (const entry of ordered) {
+    if (previous >= 0 && entry.index > previous + 1) lines.push(`[messages ${previous + 1}-${entry.index - 1} omitted as lower signal]`);
+    const clipped = entry.text.length > 1_600 ? `${entry.text.slice(0, 1_597)}...` : entry.text;
+    lines.push(`[${entry.anchor}] ${clipped}`);
+    previous = entry.index;
+  }
+  return lines.join('\n\n');
+}
+
+export function buildCompactionEvidencePacket(
+  messages: CompactRequest['messages'],
+  maxChars = 60_000,
+): CompactionEvidencePacket {
+  const entries = compactionEntries(messages);
+  const boundedChars = Math.max(8_000, Math.min(maxChars, 120_000));
+  const selected = new Map<number, CompactionEntry>();
+  const seedIndexes = new Set<number>();
+  const protectedIndexes = new Set<number>();
+  for (const entry of entries.slice(0, 3)) seedIndexes.add(entry.index);
+  for (const entry of entries.slice(-24)) seedIndexes.add(entry.index);
+  const first = entries[0];
+  if (first) protectedIndexes.add(first.index);
+  for (const entry of entries.slice(-2)) protectedIndexes.add(entry.index);
+
+  const durableGoal = selectDurableUserGoal(messages);
+  if (durableGoal) {
+    const goalEntry = [...entries].reverse().find((entry) => entry.role === 'user' && entry.text.includes(durableGoal.slice(0, 120)));
+    if (goalEntry) {
+      seedIndexes.add(goalEntry.index);
+      protectedIndexes.add(goalEntry.index);
+    }
+  }
+
+  for (const name of Object.keys(EVIDENCE_SIGNALS)) {
+    entries
+      .filter((entry) => entry.categories.includes(name))
+      .sort((left, right) => right.score - left.score || right.index - left.index)
+      .slice(0, 6)
+      .forEach((entry) => seedIndexes.add(entry.index));
+  }
+  for (const entry of entries) if (seedIndexes.has(entry.index)) selected.set(entry.index, entry);
+
+  const ranked = [...entries].sort((left, right) => right.score - left.score || right.index - left.index);
+  for (const entry of ranked) {
+    if (selected.has(entry.index)) continue;
+    const candidate = [...selected.values(), entry];
+    if (renderEvidenceEntries(candidate).length <= boundedChars) selected.set(entry.index, entry);
+  }
+
+  let rendered = renderEvidenceEntries([...selected.values()]);
+  if (rendered.length > boundedChars) {
+    const removable = [...selected.values()]
+      .filter((entry) => !protectedIndexes.has(entry.index))
+      .sort((left, right) => left.score - right.score || left.index - right.index);
+    while (rendered.length > boundedChars && removable.length) {
+      const entry = removable.shift();
+      if (entry) selected.delete(entry.index);
+      rendered = renderEvidenceEntries([...selected.values()]);
+    }
+  }
+  if (rendered.length > boundedChars) {
+    throw new Error('Compaction evidence packet could not satisfy the hard output bound');
+  }
+
+  const categoryCounts = Object.fromEntries(Object.keys(EVIDENCE_SIGNALS).map((name) => [
+    name,
+    entries.filter((entry) => entry.categories.includes(name)).length,
+  ]));
+  const selectedEntries = [...selected.values()];
+  const selectedCategoryCounts = Object.fromEntries(Object.keys(EVIDENCE_SIGNALS).map((name) => [
+    name,
+    selectedEntries.filter((entry) => entry.categories.includes(name)).length,
+  ]));
+  const categoryCoverage = Object.fromEntries(Object.keys(EVIDENCE_SIGNALS).map((name) => {
+    const total = categoryCounts[name] || 0;
+    return [name, total ? Math.min(1, (selectedCategoryCounts[name] || 0) / total) : 1];
+  }));
+
+  return {
+    text: rendered,
+    currentGoal: durableGoal,
+    sourceMessages: entries.length,
+    selectedMessages: selectedEntries.length,
+    omittedMessages: Math.max(0, entries.length - selectedEntries.length),
+    sourceChars: entries.reduce((sum, entry) => sum + entry.text.length, 0),
+    selectedChars: rendered.length,
+    anchors: selectedEntries.sort((left, right) => left.index - right.index).map((entry) => entry.anchor),
+    categoryCounts,
+    selectedCategoryCounts,
+    categoryCoverage,
+  };
 }
 
 function compactLine(role: string, content: unknown, max = 520): string | null {
@@ -171,10 +347,11 @@ function uniquePush(list: string[], value: string, max: number, clip = 220) {
 
 function inferTopics(messages: CompactRequest['messages']) {
   const scores = new Map<string, number>();
-  for (const msg of messages.slice(-240)) {
+  for (const [index, msg] of messages.entries()) {
     const text = normalizeContent(msg.content);
+    const recency = messages.length <= 1 ? 0 : index / (messages.length - 1);
     for (const [topic, re] of TOPIC_PATTERNS) {
-      if (re.test(text)) scores.set(topic, (scores.get(topic) || 0) + (msg.role === 'user' ? 3 : 1));
+      if (re.test(text)) scores.set(topic, (scores.get(topic) || 0) + (msg.role === 'user' ? 3 : 1) + recency);
     }
   }
   return Array.from(scores.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([topic]) => topic);
@@ -189,12 +366,13 @@ function extractBlocks(messages: CompactRequest['messages'], maxPerBlock = 8) {
   const timeline: string[] = [];
   const topics = inferTopics(messages);
 
-  for (const msg of messages.slice(-240)) {
-    const role = String(msg.role || 'unknown');
-    const text = normalizeContent(msg.content);
+  const ranked = compactionEntries(messages).sort((left, right) => right.score - left.score || right.index - left.index);
+  for (const entry of ranked) {
+    const role = entry.role;
+    const text = entry.text;
     if (!text || text.length < 10) continue;
-    if (role === 'user') uniquePush(timeline, `User: ${text}`, 10, 180);
-    if (role === 'assistant' && /(done|implemented|fixed|created|updated|deployed|tested|sukses|selesai)/i.test(text)) {
+    if (role === 'user' && entry.index >= Math.max(0, messages.length - 40)) uniquePush(timeline, `User: ${text}`, 10, 180);
+    if (role === 'assistant' && entry.index >= Math.max(0, messages.length - 60) && /(done|implemented|fixed|created|updated|deployed|tested|sukses|selesai)/i.test(text)) {
       uniquePush(timeline, `Assistant: ${text}`, 10, 180);
     }
 
@@ -278,19 +456,43 @@ function summarizeChunk(chunk: { start: number; end: number; messages: CompactRe
 
 function buildCompactionDag(messages: CompactRequest['messages']) {
   const topics = inferTopics(messages);
-  const chunks = chunkMessages(messages.slice(-300), 12);
-  const leafNodes = chunks.map((chunk, idx) => {
+  const chunks = chunkMessages(messages, 12);
+  const candidates = chunks.map((chunk, idx) => {
     const summary = summarizeChunk(chunk);
+    const chunkTopics = inferTopics(chunk.messages);
+    const signalMatches = Object.values(EVIDENCE_SIGNALS).filter((pattern) => pattern.test(summary)).length;
+    const recency = chunks.length <= 1 ? 0 : idx / (chunks.length - 1);
     return {
       id: `leaf-${idx + 1}`,
       level: 0,
-      topic: topics[0] || 'general',
+      topic: chunkTopics.join(',') || topics[0] || 'general',
       summary,
       source_range: [chunk.start, chunk.end] as [number, number],
+      score: signalMatches * 3 + recency * 2 + (idx === 0 || idx === chunks.length - 1 ? 2 : 0),
     };
-  }).filter(n => n.summary.trim().length > 0);
+  }).filter((node) => node.summary.trim().length > 0);
 
-  const rootSummary = leafNodes.map(n => n.summary).join(' || ').slice(0, 1600);
+  const selectedIndexes = new Set<number>();
+  if (candidates.length) selectedIndexes.add(0);
+  if (candidates.length > 1) selectedIndexes.add(candidates.length - 1);
+  candidates
+    .map((node, index) => ({ node, index }))
+    .sort((left, right) => right.node.score - left.node.score || right.index - left.index)
+    .slice(0, 18)
+    .forEach(({ index }) => selectedIndexes.add(index));
+
+  const leafNodes = [...selectedIndexes]
+    .sort((left, right) => left - right)
+    .map((index) => candidates[index])
+    .filter(Boolean)
+    .map((node) => ({
+      id: node.id,
+      level: node.level,
+      topic: node.topic,
+      summary: node.summary,
+      source_range: node.source_range,
+    }));
+  const rootSummary = leafNodes.map((node) => `[${node.source_range[0]}-${node.source_range[1]}] ${node.summary}`).join(' || ').slice(0, 3_200);
   const rootNode = {
     id: 'root-working-pack',
     level: 1,
@@ -298,8 +500,16 @@ function buildCompactionDag(messages: CompactRequest['messages']) {
     summary: rootSummary,
     source_range: [0, Math.max(0, messages.length - 1)] as [number, number],
   };
+  const sourceChunkCount = candidates.length;
+  const selectedChunkCount = leafNodes.length;
 
-  return { topics, nodes: [...leafNodes.slice(-12), rootNode] };
+  return {
+    topics,
+    nodes: [...leafNodes, rootNode],
+    sourceChunkCount,
+    selectedChunkCount,
+    chunkCoverage: sourceChunkCount ? selectedChunkCount / sourceChunkCount : 1,
+  };
 }
 
 export function buildDagCompactSnapshot(req: CompactRequest): AdvancedCompactResult {
@@ -323,7 +533,7 @@ export function buildDagCompactSnapshot(req: CompactRequest): AdvancedCompactRes
     `Zenos Compaction DAG v3`,
     `Created: ${now}`,
     `Mode: dag`,
-    `Strategy: topic-aware-compaction-dag-working-pack-v3`,
+    `Strategy: evidence-ranked-compaction-dag-working-pack-v4`,
     `Approx tokens: ${req.approx_tokens || 'unknown'}`,
     `Topics: ${(dag.topics.length ? dag.topics : ['general']).join(', ')}`,
     req.session_id ? `Session: ${req.session_id}` : '',
@@ -343,16 +553,19 @@ export function buildDagCompactSnapshot(req: CompactRequest): AdvancedCompactRes
     type: 'insight' as const,
     metadata: {
       source: 'zenos-memory-dag-compact',
-      confidence: 0.94,
+      confidence: 0.86,
       importance: 10,
-      tags: ['dag-compact', 'working-pack', 'topic-archive', 'lossless-style', 'codex-plus'],
+      tags: ['dag-compact', 'working-pack', 'topic-archive', 'evidence-ranked', 'codex-plus'],
       provenance: { session_id: req.session_id, conversation_id: req.conversation_id, created_by: 'zenos-memory-v3' },
       approx_tokens: req.approx_tokens,
       message_count: req.messages.length,
       reason: req.reason,
-      compact_strategy: 'topic-aware-compaction-dag-working-pack-v3',
+      compact_strategy: 'evidence-ranked-compaction-dag-working-pack-v4',
       topics: dag.topics,
       node_count: dag.nodes.length,
+      source_chunk_count: dag.sourceChunkCount,
+      selected_chunk_count: dag.selectedChunkCount,
+      source_chunk_coverage: dag.chunkCoverage,
       block_counts: { facts: blocks.facts.length, tasks: blocks.tasks.length, decisions: blocks.decisions.length, questions: blocks.questions.length, artifacts: blocks.artifacts?.length || 0 },
     },
     blocks: { ...blocks, working_pack: workingPack, topic_archives: topicArchives, compaction_nodes: dag.nodes },

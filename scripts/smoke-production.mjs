@@ -24,7 +24,7 @@ async function assertPublicEndpoints() {
   if (!health.ok || (await health.json()).status !== 'ok') throw new Error('Liveness endpoint failed');
   const status = await fetch(`${baseUrl}/api/memory/public-status`, { signal: AbortSignal.timeout(Math.min(timeoutMs, 60_000)), cache: 'no-store' });
   const payload = await status.json();
-  if (!status.ok || payload.version !== '2.4.0' || payload.security?.raw_secret_storage !== false) {
+  if (!status.ok || payload.version !== '2.5.0' || payload.security?.raw_secret_storage !== false) {
     throw new Error('Public capability endpoint failed');
   }
 }
