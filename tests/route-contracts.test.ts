@@ -9,8 +9,10 @@ import { resetMemoryEngineForTests } from '../app/lib/memory-engine';
 import { resetRateLimitsForTests } from '../app/lib/rate-limit';
 import { POST as bootstrapPost } from '../app/api/memory/bootstrap/route';
 import { POST as compactPost } from '../app/api/memory/compact/route';
+import { POST as cognitiveBriefPost } from '../app/api/memory/cognitive-brief/route';
 import { GET as publicStatusGet } from '../app/api/memory/public-status/route';
 import { POST as rememberPost } from '../app/api/memory/remember/route';
+import { POST as resolveConflictPost } from '../app/api/memory/resolve-conflict/route';
 import { POST as revisionPost } from '../app/api/memory/revision/route';
 
 const secret = 'route-contract-secret-that-is-long-enough-for-tests';
@@ -49,6 +51,7 @@ interface RouteBody {
   sources?: unknown[];
   request_id?: string;
   revision?: string;
+  brief?: { content?: string; sections?: Record<string, unknown> };
 }
 
 async function json(response: Response): Promise<RouteBody> {
@@ -164,6 +167,41 @@ test('namespace revision is read-scoped and changes after a durable write', asyn
   assert.equal(typeof before.revision, 'string');
   assert.equal(typeof after.revision, 'string');
   assert.notEqual(after.revision, before.revision);
+});
+
+test('cognitive brief is read-scoped while conflict resolution remains write-scoped', async () => {
+  const readToken = issueEtlaToken(secret, { scopes: ['memory:read'], subject: 'route-contract' });
+  const writeToken = issueEtlaToken(secret, { scopes: ['memory:write'], subject: 'route-contract' });
+
+  await rememberPost(request('/api/memory/remember', {
+    token: writeToken,
+    body: {
+      content: 'Decision: Hermes Host is the sole orchestrator and native workers inherit its model.',
+      namespace: 'route-contract',
+      type: 'decision',
+      metadata: { importance: 10, confidence: 0.99 },
+    },
+  }));
+
+  const missing = await cognitiveBriefPost(request('/api/memory/cognitive-brief', {
+    body: { objective: 'Host orchestrator model inheritance', namespace: 'route-contract' },
+  }));
+  const briefResponse = await cognitiveBriefPost(request('/api/memory/cognitive-brief', {
+    token: readToken,
+    body: { objective: 'Host orchestrator model inheritance', namespace: 'route-contract', limit: 10, max_chars: 4_000 },
+  }));
+  const briefBody = await json(briefResponse);
+  const wrongScope = await resolveConflictPost(request('/api/memory/resolve-conflict', {
+    token: readToken,
+    body: { id1: '11111111-1111-4111-8111-111111111111', id2: '22222222-2222-4222-8222-222222222222', namespace: 'route-contract' },
+  }));
+
+  assert.equal(missing.status, 401);
+  assert.equal(briefResponse.status, 200);
+  assert.equal(briefBody.success, true);
+  assert.match(String(briefBody.brief?.content), /sole orchestrator/i);
+  assert.equal(typeof briefBody.brief?.sections, 'object');
+  assert.equal(wrongScope.status, 401);
 });
 
 test('compact and bootstrap enforce read/write scopes and preserve bounded handoff response contracts', async () => {
