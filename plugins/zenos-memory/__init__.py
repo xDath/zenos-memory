@@ -32,17 +32,19 @@ DEFAULT_NAMESPACE = "zenos"
 def _load_config() -> dict:
     from hermes_constants import get_hermes_home
 
+    # Non-secret profile settings may live in zenos-memory.json, but service
+    # credentials and deployment endpoints delivered by systemd must remain
+    # authoritative. A stale local JSON file must never redirect a hardened
+    # production gateway back to a dead localhost service or override a rotated
+    # secret.
     cfg = {
-        "base_url": os.environ.get("ZENOS_MEMORY_URL", DEFAULT_BASE_URL),
-        "secret": os.environ.get("ETLA_MASTER_SECRET", ""),
-        "namespace": os.environ.get("ZENOS_MEMORY_NAMESPACE", DEFAULT_NAMESPACE),
-        "auto_compact_max_messages": int(os.environ.get("ZENOS_MEMORY_AUTO_COMPACT_MAX_MESSAGES", "80")),
-        "salience_batch_size": int(os.environ.get("ZENOS_MEMORY_SALIENCE_BATCH_SIZE", "4")),
-        "salience_flush_seconds": int(os.environ.get("ZENOS_MEMORY_SALIENCE_FLUSH_SECONDS", "30")),
-        "salience_spool_path": os.environ.get(
-            "ZENOS_MEMORY_SALIENCE_SPOOL_PATH",
-            str(get_hermes_home() / "state" / "zenos-memory-salience-spool.json"),
-        ),
+        "base_url": DEFAULT_BASE_URL,
+        "secret": "",
+        "namespace": DEFAULT_NAMESPACE,
+        "auto_compact_max_messages": 80,
+        "salience_batch_size": 4,
+        "salience_flush_seconds": 30,
+        "salience_spool_path": str(get_hermes_home() / "state" / "zenos-memory-salience-spool.json"),
     }
     path = get_hermes_home() / "zenos-memory.json"
     if path.exists():
@@ -51,6 +53,17 @@ def _load_config() -> dict:
             cfg.update({key: value for key, value in data.items() if value not in (None, "")})
         except Exception:
             logger.exception("Failed to load zenos-memory.json")
+
+    environment_overrides = {
+        "base_url": os.environ.get("ZENOS_MEMORY_URL"),
+        "secret": os.environ.get("ETLA_MASTER_SECRET"),
+        "namespace": os.environ.get("ZENOS_MEMORY_NAMESPACE"),
+        "auto_compact_max_messages": os.environ.get("ZENOS_MEMORY_AUTO_COMPACT_MAX_MESSAGES"),
+        "salience_batch_size": os.environ.get("ZENOS_MEMORY_SALIENCE_BATCH_SIZE"),
+        "salience_flush_seconds": os.environ.get("ZENOS_MEMORY_SALIENCE_FLUSH_SECONDS"),
+        "salience_spool_path": os.environ.get("ZENOS_MEMORY_SALIENCE_SPOOL_PATH"),
+    }
+    cfg.update({key: value for key, value in environment_overrides.items() if value not in (None, "")})
     return cfg
 
 
@@ -78,6 +91,63 @@ def _continuity_fingerprint(messages: list[dict], limit: int = 80) -> str:
         for message in bounded
     )
     return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def _deterministic_continuity_checkpoint(messages: list[dict], max_chars: int = 8_000) -> str:
+    """Build a bounded continuity handoff without any model dependency."""
+    bounded = messages[-80:]
+    entries: list[tuple[str, str]] = []
+    for message in bounded:
+        role = str(message.get("role") or "").strip().lower()
+        if role not in {"user", "assistant", "tool"}:
+            continue
+        text = re.sub(r"\s+", " ", _stable_message_content(message.get("content"))).strip()
+        if not text:
+            continue
+        entries.append((role, text[:2_400]))
+
+    user_entries = [text for role, text in entries if role == "user"]
+    current_goal = (user_entries[0] if user_entries else "Continue the active task from the preserved evidence.")[:1_200]
+    latest_request = (user_entries[-1] if user_entries else current_goal)[:1_000]
+
+    category_patterns = {
+        "Decisions": re.compile(r"\b(?:decid(?:e|ed)|decision|putuskan|diputuskan|pakai|gunakan|chosen|keep|tetap)\b", re.I),
+        "Pending work": re.compile(r"\b(?:todo|pending|next|lanjut|belum|harus|need|needs|remaining|blocker|fix|perbaiki)\b", re.I),
+        "Failures": re.compile(r"\b(?:error|failed|failure|gagal|exception|timeout|403|401|429|502|crash|rusak)\b", re.I),
+        "Completed evidence": re.compile(r"\b(?:passed|success|successful|done|completed|selesai|lulus|fixed|resolved)\b", re.I),
+    }
+    sections: dict[str, list[str]] = {name: [] for name in category_patterns}
+    artifacts: list[str] = []
+    seen: set[str] = set()
+    path_pattern = re.compile(r"(?:^|\s)(/(?:srv|var|opt|etc|root|home)/[^\s,;]+|[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+)")
+
+    for role, text in entries:
+        normalized = text.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        line = f"[{role}] {text[:600]}"
+        for name, pattern in category_patterns.items():
+            if pattern.search(text) and len(sections[name]) < 2:
+                sections[name].append(line)
+        for match in path_pattern.findall(text):
+            clean = match.rstrip(".)]}'\"")
+            if clean and clean not in artifacts and len(artifacts) < 12:
+                artifacts.append(clean)
+
+    blocks = [
+        "[Deterministic continuity checkpoint — generated without an LLM]",
+        f"Current goal: {current_goal}",
+        f"Latest user request: {latest_request}",
+    ]
+    for name in ("Decisions", "Pending work", "Failures", "Completed evidence"):
+        values = sections[name]
+        if values:
+            blocks.append(f"{name}:\n" + "\n".join(f"- {value}" for value in values))
+    if artifacts:
+        blocks.append("Artifacts and paths:\n" + "\n".join(f"- {value}" for value in artifacts))
+    blocks.append("Recovery instruction: continue the same task autonomously; do not ask the user to repeat ordinary steps already represented above.")
+    return "\n\n".join(blocks)[:max(1_000, min(max_chars, 12_000))]
 
 
 def _token_exchange_headers(secret: str, scopes: list[str], client_id: str = "hermes-zenos-memory") -> dict:
@@ -127,6 +197,8 @@ class ZenosMemoryProvider(MemoryProvider):
         self._salience_thread: threading.Thread | None = None
         self._token_cache: dict[str, tuple[str, float]] = {}
         self._token_lock = threading.Lock()
+        self._compact_inflight: set[str] = set()
+        self._compact_lock = threading.Lock()
 
     def is_available(self) -> bool:
         cfg = _load_config()
@@ -177,6 +249,8 @@ class ZenosMemoryProvider(MemoryProvider):
             self._salience_buffer = self._load_salience_spool()
         self._last_salience_flush = time.monotonic()
         self._last_compact_message_count = 0
+        with self._compact_lock:
+            self._compact_inflight.clear()
         self._start_salience_timer()
 
     def _load_salience_spool(self) -> list[dict]:
@@ -560,10 +634,90 @@ class ZenosMemoryProvider(MemoryProvider):
         ]
         return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
 
+    def _queue_cloud_compact(
+        self,
+        bounded: list[dict],
+        *,
+        fingerprint: str,
+        approx_tokens: int,
+    ) -> None:
+        """Persist a rich cloud compact asynchronously outside Hermes' hot path."""
+        if not self._secret:
+            return
+        with self._compact_lock:
+            if fingerprint in self._compact_inflight:
+                return
+            self._compact_inflight.add(fingerprint)
+
+        namespace = self._namespace
+        session_id = self._session_id
+        messages = [dict(message) for message in bounded]
+        idempotency_digest = hashlib.sha256(
+            f"{namespace}\n{fingerprint}".encode("utf-8")
+        ).hexdigest()
+
+        def _run() -> None:
+            try:
+                result = self._request(
+                    "POST",
+                    "/api/memory/compact",
+                    {
+                        "messages": messages,
+                        "namespace": namespace,
+                        "reason": "hermes-pre-compress-async",
+                        "session_id": session_id,
+                        "approx_tokens": approx_tokens,
+                        "max_chars": 8000,
+                        "input_max_chars": 120000,
+                        "mode": "dag",
+                    },
+                    idempotency_key=f"continuity-compact:{idempotency_digest}",
+                )
+                compact_value = result.get("compact")
+                compact = (
+                    str(compact_value.get("content") or "")
+                    if isinstance(compact_value, dict)
+                    else str(compact_value or "")
+                ).strip()
+                coverage = result.get("coverage") or {}
+                if not compact or coverage.get("goal") is not True:
+                    logger.warning(
+                        "Async Zenos compact stored no goal-complete cloud checkpoint"
+                    )
+                else:
+                    logger.debug(
+                        "Async Zenos cloud compact persisted fingerprint=%s chars=%d",
+                        fingerprint[:12],
+                        len(compact),
+                    )
+            except Exception as error:
+                # Local deterministic state was already returned to Hermes, so
+                # a cloud outage cannot stall or corrupt the active task.
+                logger.warning(
+                    "Async Zenos cloud compact failed; local continuation remains authoritative: %s",
+                    error,
+                )
+            finally:
+                with self._compact_lock:
+                    self._compact_inflight.discard(fingerprint)
+
+        threading.Thread(
+            target=_run,
+            name=f"zenos-memory-compact-{fingerprint[:8]}",
+            daemon=True,
+        ).start()
+
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
-        """Create one shared idempotent, coverage-checked checkpoint per compression window."""
-        self._flush_salience_buffer(force=True)
-        if not self._secret or not messages:
+        """Return local active-state continuity immediately and sync cloud later.
+
+        The old implementation blocked Hermes on token exchange, Vercel, and
+        Google Drive during every compression boundary. A slow or unavailable
+        cloud service therefore made the model appear frozen and could trigger
+        repeated fallback compactions. Active working state is now local-first:
+        Hermes receives a deterministic checkpoint synchronously, while a rich
+        DAG compact is persisted asynchronously for future recall.
+        """
+        if not messages:
             return ""
         message_count = len(messages)
         if self._last_compact_message_count and message_count - self._last_compact_message_count < 12:
@@ -571,47 +725,25 @@ class ZenosMemoryProvider(MemoryProvider):
         bounded = messages[-min(self._auto_compact_max_messages, 80):]
         input_chars = sum(len(str(message.get("content", ""))) for message in bounded)
         approx_tokens = max(1, input_chars // 4)
-        if approx_tokens < 12_000:
-            return ""
-
+        deterministic_checkpoint = _deterministic_continuity_checkpoint(bounded, max_chars=8_000)
         fingerprint = _continuity_fingerprint(bounded)
-        idempotency_digest = hashlib.sha256(
-            f"{self._namespace}\n{fingerprint}".encode("utf-8")
-        ).hexdigest()
-        try:
-            result = self._request(
-                "POST",
-                "/api/memory/compact",
-                {
-                    "messages": bounded,
-                    "namespace": self._namespace,
-                    "reason": "hermes-pre-compress",
-                    "session_id": self._session_id,
-                    "approx_tokens": approx_tokens,
-                    "max_chars": 8000,
-                    "input_max_chars": 120000,
-                    "mode": "dag",
-                },
-                idempotency_key=f"continuity-compact:{idempotency_digest}",
+        self._last_compact_message_count = message_count
+
+        # Neither salient-memory flushing nor cloud compaction may consume the
+        # compression critical path. Both are best-effort background durability.
+        if self._secret:
+            threading.Thread(
+                target=lambda: self._flush_salience_buffer(force=True),
+                name="zenos-memory-precompress-salience",
+                daemon=True,
+            ).start()
+            self._queue_cloud_compact(
+                bounded,
+                fingerprint=fingerprint,
+                approx_tokens=approx_tokens,
             )
-            compact_value = result.get("compact")
-            compact = (
-                str(compact_value.get("content") or "")
-                if isinstance(compact_value, dict)
-                else str(compact_value or "")
-            ).strip()
-            coverage = result.get("coverage") or {}
-            if not compact or coverage.get("goal") is not True:
-                logger.warning("Zenos compact rejected: missing durable goal coverage")
-                return ""
-            if len(compact) > min(8000, max(2000, int(input_chars * 0.35))):
-                logger.warning("Zenos compact rejected: insufficient reduction ratio")
-                return ""
-            self._last_compact_message_count = message_count
-            return "Zenos Memory checkpoint preserved before compression:\n" + compact
-        except Exception:
-            logger.debug("Zenos pre-compress compact failed", exc_info=True)
-        return ""
+
+        return deterministic_checkpoint
 
 
 def register_memory_provider():

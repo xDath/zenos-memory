@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Readable } from 'node:stream';
-import { drive_v3, google } from 'googleapis';
+import { GoogleAuth, OAuth2Client } from 'googleapis-common';
+import { drive_v3 } from 'googleapis/build/src/apis/drive/v3';
 import {
   buildCloudSnapshot,
   CloudMemoryEvent,
@@ -112,15 +113,15 @@ export class GoogleDriveMemoryStore {
 
   constructor(config: DriveConfig) {
     if (config.oauth) {
-      const oauthClient = new google.auth.OAuth2(config.oauth.clientId, config.oauth.clientSecret);
+      const oauthClient = new OAuth2Client(config.oauth.clientId, config.oauth.clientSecret);
       oauthClient.setCredentials({ refresh_token: config.oauth.refreshToken });
-      this.drive = google.drive({ version: 'v3', auth: oauthClient });
+      this.drive = new drive_v3.Drive({ auth: oauthClient });
     } else {
-      const auth = new google.auth.GoogleAuth({
+      const auth = new GoogleAuth({
         credentials: config.credentials,
         scopes: ['https://www.googleapis.com/auth/drive'],
       });
-      this.drive = google.drive({ version: 'v3', auth });
+      this.drive = new drive_v3.Drive({ auth });
     }
     this.rootFolderId = config.folderId?.trim() || null;
     this.rootFolderName = config.folderName?.trim() || null;

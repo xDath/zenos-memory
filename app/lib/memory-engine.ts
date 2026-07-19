@@ -541,22 +541,51 @@ export class MemoryEngine {
     }
 
     const now = new Date().toISOString();
-    const existing = this.findDuplicate(parsed.content, namespace, type);
+    const procedureSignature = type === 'procedure'
+      ? String(parsed.metadata?.procedure_signature || '').trim()
+      : '';
+    const existing = procedureSignature
+      ? this.store.list({ namespace, limit: 10_000, includeArchived: false })
+          .find(memory => memory.type === 'procedure'
+            && memory.metadata.status === 'active'
+            && String(memory.metadata.procedure_signature || '') === procedureSignature) || null
+      : this.findDuplicate(parsed.content, namespace, type);
     if (existing) {
       const mergedTags = uniqueStrings([
         ...(existing.metadata.tags || []),
         ...(parsed.metadata?.tags || []),
         ...(await this.autoTag(parsed.content)),
       ], 128);
+      const isProcedureCandidate = type === 'procedure'
+        && mergedTags.includes('validated-procedure-candidate');
+      const previousProcedureSuccesses = Number(existing.metadata.procedure_success_count || 0);
+      const incomingProcedureSuccesses = Number(parsed.metadata?.procedure_success_count || 0);
+      const procedureSuccessCount = isProcedureCandidate
+        ? Math.max(1, previousProcedureSuccesses) + Math.max(1, incomingProcedureSuccesses)
+        : Math.max(previousProcedureSuccesses, incomingProcedureSuccesses);
+      const procedurePromoted = isProcedureCandidate && procedureSuccessCount >= 3;
       const updated = await this.editUnlocked(existing.id, {
         content: parsed.content.length > existing.content.length ? parsed.content : existing.content,
         metadata: {
           ...existing.metadata,
           ...parsed.metadata,
           status: 'active',
-          confidence: Math.max(existing.metadata.confidence || 0.8, parsed.metadata?.confidence || 0.8),
-          importance: Math.max(existing.metadata.importance || 5, parsed.metadata?.importance || 5),
-          tags: mergedTags,
+          confidence: procedurePromoted
+            ? Math.max(0.96, existing.metadata.confidence || 0.8, parsed.metadata?.confidence || 0.8)
+            : Math.max(existing.metadata.confidence || 0.8, parsed.metadata?.confidence || 0.8),
+          importance: procedurePromoted
+            ? Math.max(10, existing.metadata.importance || 5, parsed.metadata?.importance || 5)
+            : Math.max(existing.metadata.importance || 5, parsed.metadata?.importance || 5),
+          tags: uniqueStrings([
+            ...mergedTags,
+            ...(procedurePromoted ? ['validated-procedure', 'procedure-promoted'] : []),
+          ], 128),
+          procedure_success_count: procedureSuccessCount || undefined,
+          procedure_promotion_status: procedurePromoted
+            ? 'promoted'
+            : isProcedureCandidate
+              ? 'candidate'
+              : existing.metadata.procedure_promotion_status,
         },
       }, namespace, existing.metadata.version, parsed.idempotency_key, 'memory_deduplicated', preparedEmbedding);
       if (!updated) throw new StorageError('Duplicate memory disappeared during update');

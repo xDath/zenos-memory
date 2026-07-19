@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
 import sys
 import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 class MemoryProvider:
@@ -119,6 +122,41 @@ class ZenosMemoryPluginTests(unittest.TestCase):
             restarted._salience_buffer[0]["idempotency_key"],
             provider._salience_buffer[0]["idempotency_key"],
         )
+
+    def test_environment_credentials_and_url_override_stale_profile_json(self):
+        home = Path(self._temporary_directory.name)
+        (home / "zenos-memory.json").write_text(json.dumps({
+            "base_url": "http://127.0.0.1:3091",
+            "secret": "stale-secret",
+            "namespace": "profile-namespace",
+        }), encoding="utf-8")
+        constants = types.ModuleType("hermes_constants")
+        constants.get_hermes_home = lambda: home
+        with patch.dict(sys.modules, {"hermes_constants": constants}), patch.dict(os.environ, {
+            "ZENOS_MEMORY_URL": "https://zenos-memory.vercel.app",
+            "ETLA_MASTER_SECRET": "systemd-secret",
+            "ZENOS_MEMORY_NAMESPACE": "runtime-namespace",
+        }, clear=False):
+            config = PLUGIN._load_config()
+        self.assertEqual(config["base_url"], "https://zenos-memory.vercel.app")
+        self.assertEqual(config["secret"], "systemd-secret")
+        self.assertEqual(config["namespace"], "runtime-namespace")
+
+    def test_pre_compress_uses_deterministic_checkpoint_when_cloud_is_unreachable(self):
+        provider = self.provider()
+        provider._request = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("cloud unavailable"))
+        messages = [
+            {"role": "user", "content": "Audit dan perbaiki Zenos Runtime sampai semua test lulus. " + ("goal " * 1800)},
+            {"role": "assistant", "content": "Keputusan: gunakan /srv/etla/workspaces/zenos-runtime. Error 502 masih pending. " + ("evidence " * 1800)},
+            {"role": "user", "content": "Lanjutkan otomatis dan jangan minta command tambahan. " + ("pending " * 1800)},
+        ]
+        checkpoint = provider.on_pre_compress(messages)
+        self.assertIn("Deterministic continuity checkpoint", checkpoint)
+        self.assertIn("Current goal:", checkpoint)
+        self.assertIn("Pending work:", checkpoint)
+        self.assertIn("Failures:", checkpoint)
+        self.assertIn("/srv/etla/workspaces/zenos-runtime", checkpoint)
+        self.assertEqual(provider._last_compact_message_count, len(messages))
 
 
 if __name__ == "__main__":
