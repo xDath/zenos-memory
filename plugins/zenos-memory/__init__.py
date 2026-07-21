@@ -237,6 +237,9 @@ class ZenosMemoryProvider(MemoryProvider):
         self._compact_jobs: dict[str, dict] = {}
         self._compact_spool_path = Path("zenos-memory-compact-spool.json")
         self._compact_lock = threading.Lock()
+        self._background_lock = threading.Lock()
+        self._background_threads: set[threading.Thread] = set()
+        self._shutdown = threading.Event()
 
     def is_available(self) -> bool:
         cfg = _load_config()
@@ -271,6 +274,7 @@ class ZenosMemoryProvider(MemoryProvider):
 
     def initialize(self, session_id: str, **kwargs) -> None:
         self._stop_salience_timer()
+        self._shutdown.clear()
         self._cfg = _load_config()
         self._base_url = str(self._cfg.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
         self._secret = str(self._cfg.get("secret") or "")
@@ -684,9 +688,49 @@ class ZenosMemoryProvider(MemoryProvider):
         except Exception as exc:
             return tool_error(str(exc))
 
+    def _start_background_job(self, target, *, name: str) -> threading.Thread | None:
+        if self._shutdown.is_set():
+            return None
+
+        def _guarded() -> None:
+            try:
+                if not self._shutdown.is_set():
+                    target()
+            finally:
+                current = threading.current_thread()
+                with self._background_lock:
+                    self._background_threads.discard(current)
+
+        thread = threading.Thread(target=_guarded, name=name, daemon=True)
+        with self._background_lock:
+            if self._shutdown.is_set():
+                return None
+            self._background_threads.add(thread)
+        thread.start()
+        return thread
+
+    def _join_background_jobs(self, timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            with self._background_lock:
+                threads = [
+                    thread
+                    for thread in self._background_threads
+                    if thread.is_alive() and thread is not threading.current_thread()
+                ]
+            if not threads:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            for thread in threads:
+                thread.join(timeout=min(0.25, remaining))
+
     def shutdown(self) -> None:
+        self._shutdown.set()
         self._stop_salience_timer()
         self._flush_salience_buffer(force=True)
+        self._join_background_jobs()
 
     def _salient_memory(self, user_content: str) -> tuple[str, str, int] | None:
         text = re.sub(r"\s+", " ", str(user_content or "")).strip()
@@ -804,11 +848,10 @@ class ZenosMemoryProvider(MemoryProvider):
                         self._persist_compact_spool_locked()
                     self._compact_inflight.discard(fingerprint)
 
-        threading.Thread(
-            target=_run,
+        self._start_background_job(
+            _run,
             name=f"zenos-memory-compact-{fingerprint[:8]}",
-            daemon=True,
-        ).start()
+        )
 
     def _queue_cloud_compact(
         self,
@@ -872,11 +915,10 @@ class ZenosMemoryProvider(MemoryProvider):
         # Neither salient-memory flushing nor cloud compaction may consume the
         # compression critical path. Both are best-effort background durability.
         if self._secret:
-            threading.Thread(
-                target=lambda: self._flush_salience_buffer(force=True),
+            self._start_background_job(
+                lambda: self._flush_salience_buffer(force=True),
                 name="zenos-memory-precompress-salience",
-                daemon=True,
-            ).start()
+            )
             self._queue_cloud_compact(
                 bounded,
                 fingerprint=fingerprint,

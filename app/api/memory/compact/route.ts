@@ -35,6 +35,140 @@ type LlmTelemetry = {
   attempts: Array<{ model: string; ok: boolean; error?: string; latency_ms?: number }>;
 };
 
+type FaithfulnessClaim = {
+  claim: string;
+  section: string;
+  evidence_anchor: string | null;
+  lexical_support: number;
+  supported: boolean;
+};
+
+type FaithfulnessReport = {
+  valid: boolean;
+  score: number;
+  claims: number;
+  evidence_backed_claims: number;
+  unsupported_claims: number;
+  packet_integrity: boolean;
+  checkpoint_chain_valid: boolean;
+  details: FaithfulnessClaim[];
+};
+
+const CLAIM_STOPWORDS = new Set([
+  'the', 'and', 'for', 'that', 'this', 'with', 'from', 'into', 'then', 'than',
+  'yang', 'dan', 'untuk', 'dari', 'dengan', 'akan', 'sudah', 'harus', 'atau',
+  'current', 'active', 'work', 'continue', 'preserve', 'verify', 'memory', 'zenos',
+]);
+
+function claimTokens(value: string): string[] {
+  return [...new Set(value
+    .toLowerCase()
+    .replace(/[^a-z0-9_./:-]+/g, ' ')
+    .split(/\s+/)
+    .map((item) => item.trim())
+    .filter((item) => item.length >= 3 && !CLAIM_STOPWORDS.has(item)))]
+    .slice(0, 80);
+}
+
+function evidenceEntries(text: string): Array<{ anchor: string; text: string; tokens: Set<string> }> {
+  const matches = [...text.matchAll(/\[(m\d+:[^\]]+)\]\s*([\s\S]*?)(?=\n\n\[m\d+:|$)/g)];
+  return matches.map((match) => {
+    const value = String(match[2] || '').replace(/\s+/g, ' ').trim();
+    return {
+      anchor: String(match[1] || ''),
+      text: value,
+      tokens: new Set(claimTokens(value)),
+    };
+  }).filter((item) => item.anchor && item.text);
+}
+
+function compactClaims(blocks: Record<string, unknown>): Array<{ section: string; claim: string }> {
+  const claims: Array<{ section: string; claim: string }> = [];
+  const scalar = (section: string, key: string) => {
+    const value = blocks[key];
+    if (typeof value === 'string' && value.trim()) claims.push({ section, claim: value.trim() });
+  };
+  const list = (section: string, key: string) => {
+    for (const value of stringList(blocks[key])) claims.push({ section, claim: value });
+  };
+  scalar('goal', 'current_goal');
+  scalar('active_state', 'active_state');
+  list('goal', 'goals');
+  list('decision', 'key_decisions');
+  list('decision', 'decisions');
+  list('fact', 'important_facts');
+  list('fact', 'facts');
+  list('constraint', 'constraints');
+  list('validation', 'validations');
+  list('completed', 'completed_work');
+  list('pending', 'pending_work');
+  list('pending', 'tasks');
+  list('blocker', 'blockers');
+  list('question', 'open_questions');
+  list('question', 'questions');
+  list('artifact', 'files_artifacts');
+  list('artifact', 'artifacts');
+  return claims.slice(0, 100);
+}
+
+function evaluateFaithfulness(input: {
+  blocks: Record<string, unknown>;
+  evidenceText: string;
+  packetIntegrity: boolean;
+  checkpointChainValid: boolean;
+}): FaithfulnessReport {
+  const entries = evidenceEntries(input.evidenceText);
+  const claims = compactClaims(input.blocks);
+  const details = claims.map(({ section, claim }): FaithfulnessClaim => {
+    const tokens = claimTokens(claim);
+    const normalizedClaim = claim.toLowerCase().replace(/\s+/g, ' ').trim();
+    let best: { anchor: string; score: number; direct: boolean } | undefined;
+    for (const entry of entries) {
+      const overlap = tokens.length
+        ? tokens.filter((token) => entry.tokens.has(token)).length / tokens.length
+        : 0;
+      const normalizedEvidence = entry.text.toLowerCase().replace(/\s+/g, ' ').trim();
+      const direct = Boolean(normalizedClaim.length >= 12 && (
+        normalizedEvidence.includes(normalizedClaim)
+        || normalizedClaim.includes(normalizedEvidence.slice(0, Math.min(160, normalizedEvidence.length)))
+      ));
+      const score = direct ? 1 : overlap;
+      if (!best || score > best.score) best = { anchor: entry.anchor, score, direct };
+    }
+    const threshold = section === 'goal' || section === 'artifact' ? 0.2 : 0.28;
+    const supported = Boolean(best && (best.direct || best.score >= threshold));
+    return {
+      claim: claim.slice(0, 1_200),
+      section,
+      evidence_anchor: supported ? best?.anchor || null : null,
+      lexical_support: Number((best?.score || 0).toFixed(4)),
+      supported,
+    };
+  });
+  const evidenceBacked = details.filter((item) => item.supported).length;
+  const score = details.length ? evidenceBacked / details.length : 1;
+  const goal = details.find((item) => item.section === 'goal');
+  const valid = input.packetIntegrity
+    && input.checkpointChainValid
+    && (!goal || goal.supported)
+    && score >= 0.72;
+  return {
+    valid,
+    score: Number(score.toFixed(4)),
+    claims: details.length,
+    evidence_backed_claims: evidenceBacked,
+    unsupported_claims: details.length - evidenceBacked,
+    packet_integrity: input.packetIntegrity,
+    checkpoint_chain_valid: input.checkpointChainValid,
+    details,
+  };
+}
+
+function faithfulnessGateEnabled(): boolean {
+  const value = String(process.env.ZENOS_MEMORY_EVIDENCE_FAITHFULNESS_ENABLED || 'true').trim().toLowerCase();
+  return !['0', 'false', 'no', 'off', 'disabled'].includes(value);
+}
+
 function stringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -239,7 +373,7 @@ export async function POST(request: NextRequest) {
       : parsed.conversation_id
         ? `conversation:${parsed.conversation_id}`
         : null;
-    const previousCompacts = compactionScope
+    const compactHistory = compactionScope
       ? (await engine.list(namespace, 250))
           .filter((item) => {
             const tags = item.metadata.tags || [];
@@ -249,8 +383,55 @@ export async function POST(request: NextRequest) {
               ? provenance?.session_id === parsed.session_id
               : provenance?.conversation_id === parsed.conversation_id;
           })
-          .slice(0, 20)
-          .map((item) => item.id)
+          .slice(0, 50)
+      : [];
+    const resolvedPreviousCheckpointId = parsed.previous_checkpoint_id || compactHistory[0]?.id;
+    const checkpointChainValid = !parsed.previous_checkpoint_id
+      || compactHistory.some((item) => item.id === parsed.previous_checkpoint_id);
+    const enforceFaithfulness = faithfulnessGateEnabled();
+    let faithfulness = evaluateFaithfulness({
+      blocks,
+      evidenceText: conversationText,
+      packetIntegrity: true,
+      checkpointChainValid,
+    });
+
+    if (enforceFaithfulness && strategy === 'llm-structured-v2' && !faithfulness.valid) {
+      blocks = sanitizeUnknown(deterministic.blocks) as Record<string, unknown>;
+      content = deterministic.content;
+      coverage = deterministicCoverage(parsed, deterministic);
+      strategy = parsed.mode === 'dag' ? 'deterministic-dag-v3' : 'deterministic-structured-v3';
+      llmTelemetry = {
+        ...llmTelemetry,
+        fallback_used: true,
+        failure_reason: 'LLM compact rejected by the evidence faithfulness gate',
+      };
+      faithfulness = evaluateFaithfulness({
+        blocks,
+        evidenceText: conversationText,
+        packetIntegrity: true,
+        checkpointChainValid,
+      });
+    }
+
+    const checkpointValidated = coverage.complete && (!enforceFaithfulness || faithfulness.valid);
+    if (parsed.source_cursor) {
+      const continuityFooter = [
+        '## Continuity Identity',
+        `Source cursor: ${parsed.source_cursor}`,
+        parsed.continuity_packet?.contentHash
+          ? `Packet hash: ${parsed.continuity_packet.contentHash}`
+          : '',
+        resolvedPreviousCheckpointId
+          ? `Previous checkpoint: ${resolvedPreviousCheckpointId}`
+          : '',
+      ].filter(Boolean).join('\n');
+      const contentBudget = parsed.max_chars || 10_000;
+      const bodyBudget = Math.max(0, contentBudget - continuityFooter.length - 2);
+      content = `${content.slice(0, bodyBudget).trimEnd()}\n\n${continuityFooter}`.slice(0, contentBudget);
+    }
+    const supersedesIds = checkpointValidated && resolvedPreviousCheckpointId
+      ? [resolvedPreviousCheckpointId]
       : [];
     const memory = await engine.remember({
       content,
@@ -258,13 +439,28 @@ export async function POST(request: NextRequest) {
       namespace,
       metadata: {
         source: 'zenos-memory-compact',
-        confidence: strategy.startsWith('llm') ? 0.92 : strategy.includes('dag') ? 0.88 : 0.8,
+        confidence: checkpointValidated
+          ? strategy.startsWith('llm') ? 0.92 : strategy.includes('dag') ? 0.88 : 0.8
+          : 0.5,
         importance: 10,
-        tags: ['compact', 'structured-handoff', strategy, coverage.complete ? 'coverage-complete' : 'coverage-partial'],
-        supersedes_ids: previousCompacts,
+        tags: [
+          'compact',
+          'structured-handoff',
+          strategy,
+          coverage.complete ? 'coverage-complete' : 'coverage-partial',
+          !enforceFaithfulness
+            ? 'faithfulness-gate-disabled'
+            : faithfulness.valid
+              ? 'faithfulness-complete'
+              : 'faithfulness-partial',
+          checkpointChainValid ? 'checkpoint-chain-valid' : 'checkpoint-chain-broken',
+        ],
+        supersedes_ids: supersedesIds,
         provenance: {
           session_id: parsed.session_id,
           conversation_id: parsed.conversation_id,
+          source_id: parsed.source_cursor,
+          source_hash: parsed.continuity_packet?.contentHash,
           created_by: 'zenos-memory',
         },
         message_count: parsed.messages.length,
@@ -285,7 +481,14 @@ export async function POST(request: NextRequest) {
         reason: parsed.reason,
         compaction_scope: compactionScope,
         compact_strategy: strategy,
+        source_cursor: parsed.source_cursor,
+        previous_checkpoint_id: resolvedPreviousCheckpointId,
+        continuity_packet_hash: parsed.continuity_packet?.contentHash,
+        checkpoint_validated: checkpointValidated,
+        checkpoint_chain_valid: checkpointChainValid,
+        faithfulness_gate_enabled: enforceFaithfulness,
         coverage,
+        faithfulness,
         block_counts: {
           decisions: stringList(blocks.key_decisions).length,
           facts: stringList(blocks.important_facts).length,
@@ -306,6 +509,11 @@ export async function POST(request: NextRequest) {
       compact: memory,
       structured_blocks: blocks,
       coverage,
+      faithfulness,
+      faithfulness_gate_enabled: enforceFaithfulness,
+      checkpoint_validated: checkpointValidated,
+      source_cursor: parsed.source_cursor,
+      previous_checkpoint_id: resolvedPreviousCheckpointId,
       strategy,
       model,
       llm_usage: llmUsage,

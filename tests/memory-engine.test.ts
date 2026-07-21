@@ -99,6 +99,48 @@ test('superseded memories are excluded from current recall', async () => {
   }
 });
 
+test('evidence-backed failure cards supersede the matching active procedure', async () => {
+  const context = fixture();
+  try {
+    const signature = 'f'.repeat(64);
+    const procedure = await context.engine.remember({
+      content: 'Validated procedure: run typecheck before publishing the Runtime release.',
+      namespace: 'learning-cards',
+      type: 'procedure',
+      metadata: {
+        tags: ['learning-card', 'learning-card-procedure', 'validated-procedure-candidate'],
+        deterministic_validation: 'passed',
+        procedure_signature: signature,
+        procedure_success_count: 1,
+        procedure_success_sessions: ['session-success'],
+      },
+    });
+    const failure = await context.engine.remember({
+      content: 'Failure card: the same procedure failed because typecheck evidence was missing.',
+      namespace: 'learning-cards',
+      type: 'insight',
+      metadata: {
+        tags: ['learning-card', 'learning-card-failure', 'evidence-backed-learning'],
+        deterministic_validation: 'failed',
+        invalidates_procedure_signature: signature,
+      },
+    });
+
+    const superseded = context.store.get(procedure.id, 'learning-cards', true);
+    assert.equal(superseded?.metadata.status, 'superseded');
+    assert.equal(failure.metadata.supersedes_ids.includes(procedure.id), true);
+    const current = await context.engine.recall({
+      query: 'typecheck procedure failure',
+      namespace: 'learning-cards',
+      limit: 10,
+    });
+    assert.equal(current.some(memory => memory.id === procedure.id), false);
+    assert.equal(current.some(memory => memory.id === failure.id), true);
+  } finally {
+    context.close();
+  }
+});
+
 test('leases enforce single-owner coordination', async () => {
   const context = fixture();
   try {

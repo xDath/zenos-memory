@@ -41,8 +41,11 @@ SPEC.loader.exec_module(PLUGIN)
 class ZenosMemoryPluginTests(unittest.TestCase):
     def setUp(self):
         self._temporary_directory = tempfile.TemporaryDirectory()
+        self._providers = []
 
     def tearDown(self):
+        for provider in reversed(self._providers):
+            provider.shutdown()
         self._temporary_directory.cleanup()
 
     def provider(self):
@@ -54,6 +57,7 @@ class ZenosMemoryPluginTests(unittest.TestCase):
         provider._salience_flush_seconds = 300
         provider._salience_spool_path = Path(self._temporary_directory.name) / "salience-spool.json"
         provider._compact_spool_path = Path(self._temporary_directory.name) / "compact-spool.json"
+        self._providers.append(provider)
         return provider
 
     def test_cross_language_continuity_fingerprint(self):

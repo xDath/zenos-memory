@@ -580,12 +580,19 @@ export class MemoryEngine {
     const procedureSignature = type === 'procedure'
       ? String(parsed.metadata?.procedure_signature || '').trim()
       : '';
+    const continuityCheckpointIdentity = String(
+      parsed.metadata?.continuity_packet_hash
+      || parsed.metadata?.source_cursor
+      || '',
+    ).trim();
     const existing = procedureSignature
       ? this.store.list({ namespace, limit: 10_000, includeArchived: false })
           .find(memory => memory.type === 'procedure'
             && memory.metadata.status === 'active'
             && String(memory.metadata.procedure_signature || '') === procedureSignature) || null
-      : this.findDuplicate(parsed.content, namespace, type);
+      : continuityCheckpointIdentity
+        ? null
+        : this.findDuplicate(parsed.content, namespace, type);
     if (existing) {
       const mergedTags = uniqueStrings([
         ...(existing.metadata.tags || []),
@@ -649,6 +656,16 @@ export class MemoryEngine {
     }
 
     const active = this.store.list({ namespace, limit: 5000, includeArchived: false });
+    const invalidatesProcedureSignature = String(
+      parsed.metadata?.invalidates_procedure_signature || '',
+    ).trim();
+    const invalidatedProcedureIds = invalidatesProcedureSignature
+      ? active
+          .filter(memory => memory.type === 'procedure'
+            && memory.metadata.status === 'active'
+            && String(memory.metadata.procedure_signature || '') === invalidatesProcedureSignature)
+          .map(memory => memory.id)
+      : [];
     const mutation = buildMutationPlan(parsed.content, active);
     const [autoTags, embedding] = await Promise.all([
       this.autoTag(parsed.content),
@@ -657,7 +674,15 @@ export class MemoryEngine {
     const metadata = MemoryMetadataSchema.parse({
       ...this.normalizedMetadata({
         ...parsed.metadata,
-        tags: [...(parsed.metadata?.tags || []), ...autoTags],
+        tags: [
+          ...(parsed.metadata?.tags || []),
+          ...autoTags,
+          ...(invalidatedProcedureIds.length ? ['procedure-invalidated-by-failure'] : []),
+        ],
+        supersedes_ids: uniqueStrings([
+          ...(parsed.metadata?.supersedes_ids || []),
+          ...invalidatedProcedureIds,
+        ], 256),
       }, parsed.content, now, mutation),
       ...embeddingMetadata(embedding),
     });

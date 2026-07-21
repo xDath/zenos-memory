@@ -1,10 +1,16 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { NextRequest } from 'next/server';
 import { issueEtlaToken } from '../app/lib/auth';
+import {
+  ContinuityPacketV2,
+  ContinuityPacketV2Schema,
+  computeContinuityPacketHash,
+} from '../app/lib/continuity-packet';
 import { resetMemoryEngineForTests } from '../app/lib/memory-engine';
 import { resetRateLimitsForTests } from '../app/lib/rate-limit';
 import { POST as bootstrapPost } from '../app/api/memory/bootstrap/route';
@@ -45,7 +51,11 @@ interface RouteBody {
   error?: { code?: string; message?: string };
   memory?: { id?: string; namespace?: string };
   compact?: { id?: string; content?: string };
-  coverage?: { goal?: boolean; decisions?: boolean; pendingWork?: boolean; artifacts?: boolean };
+  coverage?: { goal?: boolean; decisions?: boolean; pendingWork?: boolean; artifacts?: boolean; complete?: boolean };
+  faithfulness?: { valid?: boolean; score?: number; claims?: number; evidence_backed_claims?: number };
+  checkpoint_validated?: boolean;
+  source_cursor?: string;
+  previous_checkpoint_id?: string;
   llm_telemetry?: { configured?: boolean; succeeded?: boolean; failure_reason?: string | null; attempts?: unknown[] };
   bootstrap?: string;
   sources?: unknown[];
@@ -56,6 +66,229 @@ interface RouteBody {
 
 async function json(response: Response): Promise<RouteBody> {
   return await response.json() as RouteBody;
+}
+
+function contentHash(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function stressText(label: string, chars: number): string {
+  if (chars <= label.length) return label.slice(0, Math.max(1, chars));
+  const token = ` ${label.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-evidence`;
+  return `${label}${token.repeat(Math.ceil((chars - label.length) / token.length))}`.slice(0, chars);
+}
+
+function continuityStressPacket(input: {
+  targetChars: number;
+  generation: number;
+  previousCheckpointId?: string;
+}): ContinuityPacketV2 {
+  const headBudget = Math.floor(input.targetChars * 0.12);
+  const milestoneBudget = Math.floor(input.targetChars * 0.33);
+  const toolBudget = Math.floor(input.targetChars * 0.20);
+  const tailBudget = input.targetChars - headBudget - milestoneBudget - toolBudget;
+  const occurredAt = (offset: number) => new Date(Date.UTC(2026, 6, 21, 1, input.generation, offset)).toISOString();
+
+  const head: ContinuityPacketV2['head'] = [{
+    role: 'user',
+    content: 'Current goal: finish the Zenos upgrade from one user command while preserving every acceptance criterion through three compactions.',
+    message_id: 'stress-goal',
+  }];
+  let headChars = head[0].content.length;
+  let headIndex = 0;
+  while (headChars < headBudget - 200 && head.length < 20) {
+    const size = Math.min(28_000, headBudget - headChars - 100);
+    const content = stressText(`Original constraints and architecture context ${input.generation}-${headIndex}`, Math.max(200, size));
+    head.push({
+      role: 'system',
+      content,
+      message_id: `stress-head-${input.generation}-${headIndex}`,
+    });
+    headChars += content.length;
+    headIndex += 1;
+  }
+
+  const milestoneCore = [
+    ['decision', 'Decision: Runtime ContinuityCoordinator is the only checkpoint authority.'],
+    ['constraint', 'Constraint: destructive, deploy, and secret-sensitive work must fail closed or pause for approval.'],
+    ['patch', 'Patch: app/lib/continuity-coordinator.ts and app/lib/command-job.ts contain the durable implementation.'],
+    ['validation', `Validation: generation ${input.generation} typecheck and deterministic tests passed.`],
+    ['blocker', 'Blocker: event-pack production activation remains disabled until state-hash shadow comparison passes.'],
+  ] as const;
+  const milestones: ContinuityPacketV2['milestones'] = milestoneCore.map(([kind, text], index) => ({
+    kind,
+    text,
+    sourceMessageIds: [`stress-milestone-${input.generation}-${index}`],
+    sourceHash: contentHash(`${kind}:${text}:${input.generation}`),
+    occurredAt: occurredAt(index),
+  }));
+  let milestoneChars = milestones.reduce((sum, item) => sum + item.text.length, 0);
+  let milestoneIndex = 0;
+  while (milestoneChars < milestoneBudget - 1_000 && milestones.length < 100) {
+    const size = Math.min(7_800, milestoneBudget - milestoneChars);
+    const text = stressText(`Evidence milestone ${input.generation}-${milestoneIndex}`, size);
+    milestones.push({
+      kind: milestoneIndex % 2 ? 'tool_result' : 'decision',
+      text,
+      sourceMessageIds: [`stress-middle-${input.generation}-${milestoneIndex}`],
+      sourceHash: contentHash(text),
+      occurredAt: occurredAt(10 + milestoneIndex),
+    });
+    milestoneChars += text.length;
+    milestoneIndex += 1;
+  }
+
+  const activeToolState: ContinuityPacketV2['activeToolState'] = [{
+    id: `stress-test-${input.generation}`,
+    tool: 'test',
+    status: 'passed',
+    summary: `Latest test result: generation ${input.generation} passed the Runtime and Memory deterministic suites.`,
+    changedFiles: ['app/lib/continuity-coordinator.ts', 'app/lib/command-job.ts'],
+    artifactIds: [`stress-test-report-${input.generation}`],
+    sourceMessageIds: [`stress-tool-${input.generation}`],
+    sourceHash: contentHash(`stress-tool-${input.generation}`),
+    occurredAt: occurredAt(50),
+  }];
+  let toolChars = activeToolState[0].summary.length;
+  let toolIndex = 0;
+  while (toolChars < toolBudget - 1_000 && activeToolState.length < 80) {
+    const size = Math.min(7_800, toolBudget - toolChars);
+    const summary = stressText(`Tool evidence ${input.generation}-${toolIndex}`, size);
+    activeToolState.push({
+      id: `stress-tool-${input.generation}-${toolIndex}`,
+      tool: toolIndex % 2 ? 'repository-read' : 'validation',
+      status: 'passed',
+      summary,
+      changedFiles: [],
+      artifactIds: [],
+      sourceMessageIds: [`stress-tool-message-${input.generation}-${toolIndex}`],
+      sourceHash: contentHash(summary),
+      occurredAt: occurredAt(60 + toolIndex),
+    });
+    toolChars += summary.length;
+    toolIndex += 1;
+  }
+
+  const recentTail: ContinuityPacketV2['recentTail'] = [];
+  let tailChars = 0;
+  let tailIndex = 0;
+  while (tailChars < tailBudget - 400 && recentTail.length < 160) {
+    const size = Math.min(28_000, tailBudget - tailChars - 200);
+    const content = stressText(`Recent execution evidence ${input.generation}-${tailIndex}`, Math.max(200, size));
+    recentTail.push({
+      role: tailIndex % 3 === 0 ? 'tool' : 'assistant',
+      content,
+      name: tailIndex % 3 === 0 ? 'runtime-evidence' : undefined,
+      message_id: `stress-tail-${input.generation}-${tailIndex}`,
+    });
+    tailChars += content.length;
+    tailIndex += 1;
+  }
+  recentTail.push({
+    role: 'user',
+    content: 'Next action: continue automatically, finish the remaining validation, then deliver one terminal answer without asking the user to type lanjut.',
+    message_id: `stress-final-${input.generation}`,
+  });
+
+  const packet = {
+    version: 'continuity-v2' as const,
+    sessionId: 'route-stress-continuity-session',
+    turnId: `stress-turn-${input.generation}`,
+    sourceCursor: `stress:${input.generation}:${input.targetChars}`,
+    estimatedTokens: Math.ceil(input.targetChars / 4),
+    head,
+    milestones,
+    recentTail,
+    activeToolState,
+    openWork: [{
+      id: `stress-work-${input.generation}`,
+      kind: 'validate' as const,
+      text: 'Finish deterministic validation and verify checkpoint evidence before final delivery.',
+      status: 'queued' as const,
+      acceptanceCriteria: [
+        'The active goal remains present.',
+        'Architecture decisions and changed file paths remain present.',
+        'The latest test result, blocker, and next action remain present.',
+      ],
+      blockers: ['Event-pack activation waits for shadow state-hash parity.'],
+      sourceMessageIds: [`stress-final-${input.generation}`],
+      sourceHash: contentHash(`stress-work-${input.generation}`),
+    }],
+    previousCheckpointId: input.previousCheckpointId,
+    contentHash: '',
+  } satisfies ContinuityPacketV2;
+  return { ...packet, contentHash: computeContinuityPacketHash(packet) };
+}
+
+function continuityPacket(input: {
+  sourceCursor: string;
+  previousCheckpointId?: string;
+  additionalMilestone?: string;
+}): ContinuityPacketV2 {
+  const packet = {
+    version: 'continuity-v2' as const,
+    sessionId: 'route-continuity-session',
+    turnId: `turn-${input.sourceCursor}`,
+    sourceCursor: input.sourceCursor,
+    estimatedTokens: 190_000,
+    head: [{
+      role: 'user' as const,
+      content: 'Current goal: preserve the active Runtime upgrade acceptance criteria through compaction.',
+      message_id: 'm0',
+    }],
+    milestones: [
+      {
+        kind: 'decision' as const,
+        text: 'Decision: Runtime is the single checkpoint authority and Memory stores verified checkpoints.',
+        sourceMessageIds: ['m40'],
+        sourceHash: 'a'.repeat(64),
+        occurredAt: '2026-07-21T00:00:00.000Z',
+      },
+      {
+        kind: 'constraint' as const,
+        text: 'Constraint: do not replace the previous checkpoint until evidence validation passes.',
+        sourceMessageIds: ['m41'],
+        sourceHash: 'b'.repeat(64),
+        occurredAt: '2026-07-21T00:00:01.000Z',
+      },
+      ...(input.additionalMilestone ? [{
+        kind: 'validation' as const,
+        text: input.additionalMilestone,
+        sourceMessageIds: ['m90'],
+        sourceHash: 'c'.repeat(64),
+        occurredAt: '2026-07-21T00:01:00.000Z',
+      }] : []),
+    ],
+    recentTail: [{
+      role: 'user' as const,
+      content: 'Pending work: run deterministic tests and continue from the verified checkpoint.',
+      message_id: 'm99',
+    }],
+    activeToolState: [{
+      id: 'tool-test-1',
+      tool: 'test',
+      status: 'passed' as const,
+      summary: 'Validation result: Runtime typecheck passed and the changed file is app/lib/gateway-continuity.ts.',
+      changedFiles: ['app/lib/gateway-continuity.ts'],
+      artifactIds: ['runtime-test-report'],
+      sourceMessageIds: ['m80'],
+      sourceHash: 'd'.repeat(64),
+      occurredAt: '2026-07-21T00:00:30.000Z',
+    }],
+    openWork: [{
+      id: 'work-validate',
+      kind: 'validate' as const,
+      text: 'Run the full deterministic test suite before final delivery.',
+      status: 'queued' as const,
+      acceptanceCriteria: ['All relevant deterministic tests pass.'],
+      blockers: [],
+      sourceMessageIds: ['m99'],
+      sourceHash: 'e'.repeat(64),
+    }],
+    previousCheckpointId: input.previousCheckpointId,
+    contentHash: '',
+  } satisfies ContinuityPacketV2;
+  return { ...packet, contentHash: computeContinuityPacketHash(packet) };
 }
 
 test.beforeEach(() => {
@@ -247,6 +480,120 @@ test('compact and bootstrap enforce read/write scopes and preserve bounded hando
   assert.ok(String(bootstrapBody.bootstrap).includes('Zenos Memory Bootstrap'));
   assert.ok(String(bootstrapBody.bootstrap).length <= 4_000);
   assert.ok(Array.isArray(bootstrapBody.sources));
+});
+
+test('ContinuityPacket v2 validates evidence, chains checkpoints, and rejects tampering', async () => {
+  const writeToken = issueEtlaToken(secret, { scopes: ['memory:write'], subject: 'route-contract' });
+  const firstPacket = continuityPacket({ sourceCursor: 'msg:100:first' });
+  const firstResponse = await compactPost(request('/api/memory/compact', {
+    token: writeToken,
+    headers: { 'idempotency-key': 'route-continuity-first' },
+    body: {
+      continuity_packet: firstPacket,
+      namespace: 'route-continuity',
+      mode: 'dag',
+      max_chars: 6_000,
+      input_max_chars: 60_000,
+    },
+  }));
+  const first = await json(firstResponse);
+
+  assert.equal(firstResponse.status, 200);
+  assert.equal(first.success, true);
+  assert.equal(first.source_cursor, firstPacket.sourceCursor);
+  assert.equal(first.coverage?.complete, true);
+  assert.equal(first.faithfulness?.valid, true);
+  assert.ok((first.faithfulness?.claims || 0) > 0);
+  assert.equal(first.checkpoint_validated, true);
+  assert.equal(typeof first.compact?.id, 'string');
+
+  const secondPacket = continuityPacket({
+    sourceCursor: 'msg:101:second',
+    previousCheckpointId: first.compact?.id,
+    additionalMilestone: 'Validation: the ContinuityPacket checkpoint chain test passed.',
+  });
+  const secondResponse = await compactPost(request('/api/memory/compact', {
+    token: writeToken,
+    headers: { 'idempotency-key': 'route-continuity-second' },
+    body: {
+      continuity_packet: secondPacket,
+      namespace: 'route-continuity',
+      mode: 'dag',
+      max_chars: 6_000,
+      input_max_chars: 60_000,
+    },
+  }));
+  const second = await json(secondResponse);
+
+  assert.equal(secondResponse.status, 200);
+  assert.equal(second.success, true);
+  assert.equal(second.source_cursor, secondPacket.sourceCursor);
+  assert.equal(second.previous_checkpoint_id, first.compact?.id);
+  assert.equal(second.faithfulness?.valid, true);
+  assert.equal(second.checkpoint_validated, true);
+  assert.notEqual(second.compact?.id, first.compact?.id);
+
+  const tampered = { ...secondPacket, sourceCursor: 'msg:102:tampered' };
+  const invalidResponse = await compactPost(request('/api/memory/compact', {
+    token: writeToken,
+    body: {
+      continuity_packet: tampered,
+      namespace: 'route-continuity',
+      mode: 'dag',
+    },
+  }));
+  const invalid = await json(invalidResponse);
+  assert.equal(invalidResponse.status, 400);
+  assert.equal(invalid.error?.code, 'VALIDATION_ERROR');
+  assert.match(String(invalid.error?.message), /validation/i);
+});
+
+test('three consecutive large ContinuityPacket compactions preserve goal, decisions, evidence, blockers, and next action', async () => {
+  const writeToken = issueEtlaToken(secret, { scopes: ['memory:write'], subject: 'route-stress-contract' });
+  const sizes = [160_000, 300_000, 500_000];
+  let previousCheckpointId: string | undefined;
+
+  for (let index = 0; index < sizes.length; index += 1) {
+    const packet = continuityStressPacket({
+      targetChars: sizes[index],
+      generation: index + 1,
+      previousCheckpointId,
+    });
+    const wirePacket = JSON.parse(JSON.stringify(packet)) as ContinuityPacketV2;
+    assert.equal(computeContinuityPacketHash(wirePacket), packet.contentHash);
+    const parsedPacket = ContinuityPacketV2Schema.parse(wirePacket);
+    assert.equal(computeContinuityPacketHash(parsedPacket), packet.contentHash);
+    const response = await compactPost(request('/api/memory/compact', {
+      token: writeToken,
+      headers: { 'idempotency-key': `route-stress-continuity-${index + 1}` },
+      body: {
+        continuity_packet: packet,
+        namespace: 'route-stress-continuity',
+        mode: 'dag',
+        max_chars: 12_000,
+        input_max_chars: sizes[index],
+      },
+    }));
+    const body = await json(response);
+    const compact = String(body.compact?.content || '');
+
+    assert.equal(response.status, 200, JSON.stringify(body.error || body));
+    assert.equal(body.success, true);
+    assert.equal(body.coverage?.complete, true);
+    assert.equal(body.faithfulness?.valid, true);
+    assert.equal(body.checkpoint_validated, true);
+    assert.equal(body.source_cursor, packet.sourceCursor);
+    assert.equal(body.previous_checkpoint_id, previousCheckpointId);
+    assert.match(compact, /finish the Zenos upgrade|one user command/i);
+    assert.match(compact, /only checkpoint authority/i);
+    assert.match(compact, /continuity-coordinator\.ts|command-job\.ts/i);
+    assert.match(compact, /deterministic tests passed|deterministic suites/i);
+    assert.match(compact, /event-pack|state-hash/i);
+    assert.match(compact, /continue automatically|remaining validation|terminal answer/i);
+    assert.equal(typeof body.compact?.id, 'string');
+    assert.notEqual(body.compact?.id, previousCheckpointId);
+    previousCheckpointId = body.compact?.id;
+  }
 });
 
 test('compact rejects oversized request bodies before JSON processing', async () => {

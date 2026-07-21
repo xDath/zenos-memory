@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import {
+  ContinuityPacketV2Schema,
+  continuityPacketToMessages,
+  validateContinuityPacket,
+} from './continuity-packet';
 import { Memory } from './schema';
 import { redactSensitiveText as redactSecrets } from './secrets';
 
@@ -8,10 +13,14 @@ export const CompactMessageSchema = z.object({
   content: z.any(),
   name: z.string().optional(),
   tool_call_id: z.string().optional(),
+  message_id: z.string().optional(),
 });
 
-export const CompactRequestSchema = z.object({
-  messages: z.array(CompactMessageSchema).min(1).max(400),
+const CompactRequestBaseSchema = z.object({
+  messages: z.array(CompactMessageSchema).max(400).optional().default([]),
+  continuity_packet: ContinuityPacketV2Schema.optional(),
+  source_cursor: z.string().trim().min(1).max(500).optional(),
+  previous_checkpoint_id: z.string().trim().min(1).max(500).optional(),
   namespace: z.string().optional().default('zenos'),
   reason: z.string().optional().default('auto-compact'),
   approx_tokens: z.number().int().positive().optional(),
@@ -21,9 +30,53 @@ export const CompactRequestSchema = z.object({
   input_max_chars: z.number().int().positive().max(500000).optional(),
   mode: z.enum(['deterministic', 'advanced', 'dag']).optional().default('dag'),
 }).superRefine((request, context) => {
+  if (!request.messages.length && !request.continuity_packet) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['messages'],
+      message: 'Compact request requires messages or continuity_packet',
+    });
+    return;
+  }
+  const packetIntegrityValid = !request.continuity_packet
+    || validateContinuityPacket(request.continuity_packet);
+  if (!packetIntegrityValid) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['continuity_packet', 'contentHash'],
+      message: 'ContinuityPacket v2 contentHash is invalid',
+    });
+  }
+  if (
+    request.continuity_packet
+    && request.source_cursor
+    && request.source_cursor !== request.continuity_packet.sourceCursor
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['source_cursor'],
+      message: 'source_cursor does not match continuity_packet.sourceCursor',
+    });
+  }
+  if (
+    request.continuity_packet?.previousCheckpointId
+    && request.previous_checkpoint_id
+    && request.previous_checkpoint_id !== request.continuity_packet.previousCheckpointId
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['previous_checkpoint_id'],
+      message: 'previous_checkpoint_id does not match continuity_packet.previousCheckpointId',
+    });
+  }
   const aggregateLimit = request.input_max_chars || 120_000;
+  const messages = request.messages.length
+    ? request.messages
+    : request.continuity_packet && packetIntegrityValid
+      ? continuityPacketToMessages(request.continuity_packet, aggregateLimit)
+      : [];
   let aggregateChars = 0;
-  for (const [index, message] of request.messages.entries()) {
+  for (const [index, message] of messages.entries()) {
     const chars = normalizeContent(message.content).length;
     aggregateChars += chars;
     if (chars > 32_000) {
@@ -41,6 +94,27 @@ export const CompactRequestSchema = z.object({
       message: `Compact source exceeds input_max_chars (${aggregateChars} > ${aggregateLimit})`,
     });
   }
+});
+
+export const CompactRequestSchema = CompactRequestBaseSchema.transform((request) => {
+  const resolved = {
+    ...request,
+    messages: request.messages.length
+      ? request.messages
+      : request.continuity_packet
+        ? continuityPacketToMessages(request.continuity_packet, request.input_max_chars || 120_000)
+        : [],
+  };
+  if (!resolved.source_cursor && request.continuity_packet) resolved.source_cursor = request.continuity_packet.sourceCursor;
+  if (!resolved.previous_checkpoint_id && request.continuity_packet?.previousCheckpointId) {
+    resolved.previous_checkpoint_id = request.continuity_packet.previousCheckpointId;
+  }
+  if (!resolved.session_id && request.continuity_packet) resolved.session_id = request.continuity_packet.sessionId;
+  if (!resolved.conversation_id && request.continuity_packet) resolved.conversation_id = request.continuity_packet.turnId;
+  if (!resolved.approx_tokens && request.continuity_packet?.estimatedTokens) {
+    resolved.approx_tokens = request.continuity_packet.estimatedTokens;
+  }
+  return resolved;
 });
 
 export const BootstrapRequestSchema = z.object({
@@ -341,6 +415,10 @@ export interface AdvancedCompactResult {
     decisions: string[];
     questions: string[];
     topics: string[];
+    goals?: string[];
+    constraints?: string[];
+    validations?: string[];
+    blockers?: string[];
     artifacts?: string[];
     timeline?: string[];
     working_pack?: string[];
@@ -383,9 +461,31 @@ function extractBlocks(messages: CompactRequest['messages'], maxPerBlock = 8) {
   const tasks: string[] = [];
   const decisions: string[] = [];
   const questions: string[] = [];
+  const goals: string[] = [];
+  const constraints: string[] = [];
+  const validations: string[] = [];
+  const blockers: string[] = [];
   const artifacts: string[] = [];
   const timeline: string[] = [];
   const topics = inferTopics(messages);
+
+  // ContinuityPacket milestones are evidence-addressed contracts, not generic
+  // prose. Reserve protected slots for every state-bearing milestone before
+  // relevance-ranked filler is allowed to consume a block budget.
+  for (const message of messages) {
+    const text = normalizeContent(message.content).replace(/\s+/g, ' ').trim();
+    const milestone = text.match(/^\[continuity-v2 milestone kind=(goal|decision|constraint|tool_result|patch|validation|blocker)\b[^\]]*\]\s*(.*)$/i);
+    if (!milestone) continue;
+    const kind = milestone[1].toLowerCase();
+    const claim = milestone[2].trim();
+    if (!claim) continue;
+    if (kind === 'goal') uniquePush(goals, claim, 6, 420);
+    if (kind === 'decision') uniquePush(decisions, claim, 8, 420);
+    if (kind === 'constraint') uniquePush(constraints, claim, 8, 420);
+    if (kind === 'validation') uniquePush(validations, claim, 8, 420);
+    if (kind === 'blocker') uniquePush(blockers, claim, 8, 420);
+    if (kind === 'patch' || kind === 'tool_result') uniquePush(artifacts, claim, 10, 420);
+  }
 
   const ranked = compactionEntries(messages).sort((left, right) => right.score - left.score || right.index - left.index);
   for (const entry of ranked) {
@@ -398,13 +498,23 @@ function extractBlocks(messages: CompactRequest['messages'], maxPerBlock = 8) {
     }
 
     if (/(prefer|suka|always|jangan|harus|wants?|pengen|preference|style)/i.test(text)) uniquePush(facts, text, maxPerBlock, 240);
-    if (/(todo|next|lanjut|gass|fix|implement|deploy|push|test|bikin|tambahkan|upgrade)/i.test(text)) uniquePush(tasks, text, maxPerBlock, 220);
-    if (/(decided|final|sudah|done|selesai|approved|confirmed|pakai|gunakan|primary|fallback)/i.test(text)) uniquePush(decisions, text, maxPerBlock, 220);
+    if (/(current goal|objective|tujuan|todo|next|lanjut|gass|fix|implement|deploy|push|test|bikin|tambahkan|upgrade)/i.test(text)) uniquePush(tasks, text, maxPerBlock, 220);
+    if (/(decision|decided|final|sudah|done|selesai|approved|confirmed|pakai|gunakan|primary|fallback)/i.test(text)) uniquePush(decisions, text, maxPerBlock, 220);
+    if (/(blocker|blocked|failure|failed|error|timeout|menunggu|pending approval)/i.test(text)) uniquePush(blockers, text, maxPerBlock, 260);
+    if (/(validation|validated|typecheck|lint|tests? passed|build passed)/i.test(text)) uniquePush(validations, text, maxPerBlock, 260);
     if (/[?？]|(belum|masih|kenapa|gimana|apakah|bisa ga|cek sekalian)/i.test(text)) uniquePush(questions, text, maxPerBlock, 180);
     if (/(\/root\/|app\/|api\/|\.ts|\.py|vercel|github|drive|folder|endpoint|env)/i.test(text)) uniquePush(artifacts, text, maxPerBlock, 220);
   }
 
-  return { facts, tasks, decisions, questions, topics, artifacts, timeline };
+  if (!goals.length) {
+    const goal = tasks.find(item => /(current goal|objective|tujuan|upgrade|implement|fix)/i.test(item));
+    if (goal) uniquePush(goals, goal, 6, 420);
+  }
+  for (const constraint of constraints) uniquePush(facts, constraint, maxPerBlock, 260);
+  for (const validation of validations) uniquePush(tasks, validation, maxPerBlock, 260);
+  for (const blocker of blockers) uniquePush(questions, blocker, maxPerBlock, 260);
+
+  return { facts, tasks, decisions, questions, topics, goals, constraints, validations, blockers, artifacts, timeline };
 }
 
 export function buildAdvancedCompactSnapshot(req: CompactRequest): AdvancedCompactResult {
@@ -422,9 +532,13 @@ export function buildAdvancedCompactSnapshot(req: CompactRequest): AdvancedCompa
 
   const sections: string[] = [];
 
+  if (blocks.goals?.length) sections.push('## Active Goals\n' + blocks.goals.map(value => `- ${value}`).join('\n'));
+  if (blocks.decisions.length) sections.push('## Key Decisions\n' + blocks.decisions.map(d => `- ${d}`).join('\n'));
+  if (blocks.constraints?.length) sections.push('## Constraints\n' + blocks.constraints.map(value => `- ${value}`).join('\n'));
+  if (blocks.validations?.length) sections.push('## Validation Evidence\n' + blocks.validations.map(value => `- ${value}`).join('\n'));
+  if (blocks.blockers?.length) sections.push('## Blockers\n' + blocks.blockers.map(value => `- ${value}`).join('\n'));
   if (blocks.facts.length) sections.push('## Key Facts\n' + blocks.facts.map(f => `- ${f}`).join('\n'));
   if (blocks.tasks.length) sections.push('## Active Tasks\n' + blocks.tasks.map(t => `- ${t}`).join('\n'));
-  if (blocks.decisions.length) sections.push('## Key Decisions\n' + blocks.decisions.map(d => `- ${d}`).join('\n'));
   if (blocks.questions.length) sections.push('## Open Questions\n' + blocks.questions.map(q => `- ${q}`).join('\n'));
   if (blocks.artifacts?.length) sections.push('## Files / Endpoints / Artifacts\n' + blocks.artifacts.map(a => `- ${a}`).join('\n'));
   if (blocks.timeline?.length) sections.push('## Recent Timeline\n' + blocks.timeline.map(t => `- ${t}`).join('\n'));
@@ -538,11 +652,15 @@ export function buildDagCompactSnapshot(req: CompactRequest): AdvancedCompactRes
   const blocks = extractBlocks(req.messages, 10);
   const dag = buildCompactionDag(req.messages);
   const workingPack = [
-    ...(blocks.tasks || []).map(x => `Task: ${x}`),
-    ...(blocks.decisions || []).map(x => `Decision: ${x}`),
-    ...(blocks.facts || []).map(x => `Fact: ${x}`),
-    ...(blocks.artifacts || []).map(x => `Artifact: ${x}`),
-  ].slice(0, 18);
+    ...(blocks.goals || []).slice(0, 3).map(x => `Goal: ${x}`),
+    ...(blocks.decisions || []).slice(0, 4).map(x => `Decision: ${x}`),
+    ...(blocks.constraints || []).slice(0, 4).map(x => `Constraint: ${x}`),
+    ...(blocks.validations || []).slice(0, 4).map(x => `Validation: ${x}`),
+    ...(blocks.blockers || []).slice(0, 4).map(x => `Blocker: ${x}`),
+    ...(blocks.tasks || []).slice(0, 4).map(x => `Task: ${x}`),
+    ...(blocks.artifacts || []).slice(0, 6).map(x => `Artifact: ${x}`),
+    ...(blocks.facts || []).slice(0, 3).map(x => `Fact: ${x}`),
+  ];
 
   const topicArchives: Record<string, string[]> = {};
   for (const topic of dag.topics.length ? dag.topics : ['general']) {
