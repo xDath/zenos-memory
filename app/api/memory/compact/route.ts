@@ -312,8 +312,11 @@ export async function POST(request: NextRequest) {
     let coverage: CoverageReport;
     let model: string | null = null;
     let llmUsage: Record<string, number> | null = null;
+    const llmConfigured = hasMemoryLLM();
+    const continuityLlmEnabled = process.env.ZENOS_MEMORY_CONTINUITY_LLM_ENABLED === 'true';
+    const shouldUseLlm = llmConfigured && (!parsed.continuity_packet || continuityLlmEnabled);
     let llmTelemetry: LlmTelemetry = {
-      configured: hasMemoryLLM(),
+      configured: llmConfigured,
       succeeded: false,
       fallback_used: false,
       selected_model: null,
@@ -322,7 +325,7 @@ export async function POST(request: NextRequest) {
     };
     let strategy: 'llm-structured-v2' | 'deterministic-structured-v3' | 'deterministic-dag-v3';
 
-    if (hasMemoryLLM()) {
+    if (shouldUseLlm) {
       // The deterministic snapshot remains the fallback/coverage source; do not
       // duplicate it inside the LLM prompt alongside the same raw transcript.
       const result = await compactWithLLM(conversationText);
@@ -363,7 +366,9 @@ export async function POST(request: NextRequest) {
       content = deterministic.content;
       strategy = parsed.mode === 'dag' ? 'deterministic-dag-v3' : 'deterministic-structured-v3';
       coverage = deterministicCoverage(parsed, deterministic);
-      llmTelemetry.failure_reason = 'Memory LLM is not configured';
+      llmTelemetry.failure_reason = llmConfigured && parsed.continuity_packet
+        ? 'ContinuityPacket v2 uses deterministic compaction by default to stay within the serverless write deadline'
+        : 'Memory LLM is not configured';
     }
 
     if (!content.trim()) throw new Error('Compaction produced no durable content');

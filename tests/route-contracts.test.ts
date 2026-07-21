@@ -57,6 +57,7 @@ interface RouteBody {
   source_cursor?: string;
   previous_checkpoint_id?: string;
   llm_telemetry?: { configured?: boolean; succeeded?: boolean; failure_reason?: string | null; attempts?: unknown[] };
+  strategy?: string;
   bootstrap?: string;
   sources?: unknown[];
   request_id?: string;
@@ -303,6 +304,7 @@ test.beforeEach(() => {
   delete process.env.ZENOS_MEMORY_API_KEY;
   delete process.env.MEMORY_LLM_MODEL;
   delete process.env.MEMORY_LLM_FALLBACK_MODEL;
+  delete process.env.ZENOS_MEMORY_CONTINUITY_LLM_ENABLED;
 });
 
 test.afterEach(() => {
@@ -546,6 +548,69 @@ test('ContinuityPacket v2 validates evidence, chains checkpoints, and rejects ta
   assert.equal(invalidResponse.status, 400);
   assert.equal(invalid.error?.code, 'VALIDATION_ERROR');
   assert.match(String(invalid.error?.message), /validation/i);
+});
+
+test('ContinuityPacket v2 stays deterministic-first when an LLM is configured unless explicitly opted in', async () => {
+  const writeToken = issueEtlaToken(secret, { scopes: ['memory:write'], subject: 'route-contract' });
+  const originalFetch = globalThis.fetch;
+  const previous = {
+    baseUrl: process.env.MEMORY_LLM_BASE_URL,
+    apiKey: process.env.MEMORY_LLM_API_KEY,
+    model: process.env.MEMORY_LLM_MODEL,
+    semantic: process.env.MEMORY_SEMANTIC_EXPANSION_ENABLED,
+    continuityLlm: process.env.ZENOS_MEMORY_CONTINUITY_LLM_ENABLED,
+  };
+  process.env.MEMORY_LLM_BASE_URL = 'http://llm.test/v1';
+  process.env.MEMORY_LLM_API_KEY = 'test-key';
+  process.env.MEMORY_LLM_MODEL = 'test-model';
+  process.env.MEMORY_SEMANTIC_EXPANSION_ENABLED = 'false';
+  delete process.env.ZENOS_MEMORY_CONTINUITY_LLM_ENABLED;
+  let providerCalls = 0;
+  globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+    if (String(input).startsWith('http://llm.test')) {
+      providerCalls += 1;
+      return Response.json({ error: 'continuity must not call the LLM by default' }, { status: 500 });
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    const packet = continuityPacket({ sourceCursor: 'msg:103:deterministic-first' });
+    const response = await compactPost(request('/api/memory/compact', {
+      token: writeToken,
+      headers: { 'idempotency-key': 'route-continuity-deterministic-first' },
+      body: {
+        continuity_packet: packet,
+        namespace: 'route-continuity-deterministic-first',
+        mode: 'dag',
+        max_chars: 6_000,
+        input_max_chars: 60_000,
+      },
+    }));
+    const body = await json(response);
+
+    assert.equal(response.status, 200, JSON.stringify(body.error || body));
+    assert.equal(body.success, true);
+    assert.equal(body.checkpoint_validated, true);
+    assert.equal(body.strategy, 'deterministic-dag-v3');
+    assert.equal(body.llm_telemetry?.configured, true);
+    assert.equal(body.llm_telemetry?.succeeded, false);
+    assert.deepEqual(body.llm_telemetry?.attempts, []);
+    assert.match(String(body.llm_telemetry?.failure_reason), /deterministic compaction by default/i);
+    assert.equal(providerCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previous.baseUrl === undefined) delete process.env.MEMORY_LLM_BASE_URL;
+    else process.env.MEMORY_LLM_BASE_URL = previous.baseUrl;
+    if (previous.apiKey === undefined) delete process.env.MEMORY_LLM_API_KEY;
+    else process.env.MEMORY_LLM_API_KEY = previous.apiKey;
+    if (previous.model === undefined) delete process.env.MEMORY_LLM_MODEL;
+    else process.env.MEMORY_LLM_MODEL = previous.model;
+    if (previous.semantic === undefined) delete process.env.MEMORY_SEMANTIC_EXPANSION_ENABLED;
+    else process.env.MEMORY_SEMANTIC_EXPANSION_ENABLED = previous.semantic;
+    if (previous.continuityLlm === undefined) delete process.env.ZENOS_MEMORY_CONTINUITY_LLM_ENABLED;
+    else process.env.ZENOS_MEMORY_CONTINUITY_LLM_ENABLED = previous.continuityLlm;
+  }
 });
 
 test('three consecutive large ContinuityPacket compactions preserve goal, decisions, evidence, blockers, and next action', async () => {

@@ -6,6 +6,33 @@ import {
   CompactRequestSchema,
   selectDurableUserGoal,
 } from '../app/lib/compaction';
+import { computeContinuityPacketHash } from '../app/lib/continuity-packet';
+
+test('ContinuityPacket hash matches the Python and Runtime cross-language fixture', () => {
+  const fixture = {
+    version: 'continuity-v2' as const,
+    sessionId: 'fixture-session',
+    turnId: 'fixture-turn',
+    sourceCursor: 'msg:3:fixture',
+    estimatedTokens: 123456,
+    head: [{ role: 'user' as const, content: 'Preserve tujuan utama.', message_id: 'm0' }],
+    milestones: [{
+      kind: 'decision' as const,
+      text: 'Runtime owns checkpoints.',
+      sourceMessageIds: ['m1'],
+      sourceHash: 'a'.repeat(64),
+      occurredAt: '2026-07-21T00:00:00.000Z',
+    }],
+    recentTail: [{ role: 'user' as const, content: 'Continue validation.', message_id: 'm2' }],
+    activeToolState: [],
+    openWork: [],
+    previousCheckpointId: 'checkpoint-0',
+  };
+  assert.equal(
+    computeContinuityPacketHash({ ...fixture, contentHash: '' }),
+    'fa768c2c48eb15230c08088c924926001c71670c650c95f11f8bc533a1ec67d9',
+  );
+});
 
 test('compact contract separates large bounded input from small durable output', () => {
   const parsed = CompactRequestSchema.parse({
