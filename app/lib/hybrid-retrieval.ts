@@ -13,6 +13,7 @@ export type HybridScore = {
     recency: number;
     importance: number;
     confidence: number;
+    usefulness: number;
     current: number;
   };
 };
@@ -69,6 +70,16 @@ function recencyScore(memory: Memory): number {
   if (!Number.isFinite(timestamp)) return 0;
   const ageDays = Math.max(0, (Date.now() - timestamp) / 86_400_000);
   return Math.max(0, 1 - ageDays / 120);
+}
+
+function feedbackUsefulness(memory: Memory): number {
+  const positive = Math.max(0, Number(memory.metadata.recall_positive_count || 0));
+  const negative = Math.max(0, Number(memory.metadata.recall_negative_count || 0));
+  const total = positive + negative;
+  if (!total) return 0.5;
+  const posterior = (positive + 1) / (total + 2);
+  const evidenceStrength = Math.min(1, total / 12);
+  return 0.5 + (posterior - 0.5) * evidenceStrength;
 }
 
 function currentScore(memory: Memory): number {
@@ -181,6 +192,7 @@ export function rankHybrid(
       recency: recencyScore(memory),
       importance: (memory.metadata.importance || 5) / 10,
       confidence: memory.metadata.confidence || 0.8,
+      usefulness: feedbackUsefulness(memory),
       current: currentScore(memory),
       semanticMode: sameDenseSpace ? 'dense' : 'deterministic',
     };
@@ -198,11 +210,12 @@ export function rankHybrid(
 
   const ranked = candidates
     .map((item, index) => {
-      const { memory, vector, keyword, graph: graphSignal, recency, importance, confidence, current } = item;
+      const { memory, vector, keyword, graph: graphSignal, recency, importance, confidence, usefulness, current } = item;
       const fusion = maximumFusion ? rawFusion[index] / maximumFusion : 0;
+      const feedbackAdjustment = (usefulness - 0.5) * 12;
       const score = emptyQuery
-        ? importance * 30 + confidence * 25 + recency * 20 + current * 25
-        : fusion * 48 + vector * 16 + keyword * 12 + graphSignal * 8 + importance * 5 + confidence * 4 + recency * 3 + current * 4;
+        ? importance * 28 + confidence * 23 + recency * 18 + current * 25 + usefulness * 6
+        : fusion * 48 + vector * 16 + keyword * 12 + graphSignal * 8 + importance * 5 + confidence * 4 + recency * 3 + current * 4 + feedbackAdjustment;
       const reason = current === 0
         ? 'superseded-or-expired'
         : graphSignal >= 0.25
@@ -214,7 +227,7 @@ export function rankHybrid(
         memory,
         score,
         reason,
-        signals: { vector, keyword, graph: graphSignal, fusion, recency, importance, confidence, current },
+        signals: { vector, keyword, graph: graphSignal, fusion, recency, importance, confidence, usefulness, current },
       };
     })
     .filter(item => item.signals.current > 0 || emptyQuery)

@@ -70,6 +70,15 @@ export const MemoryMetadataSchema = z
     embedding_generated_at: z.string().datetime().optional(),
     embedding_degraded: z.boolean().optional(),
     embedding_error: z.string().max(500).optional(),
+    deterministic_validation: z.enum(['passed', 'failed', 'unknown']).optional(),
+    procedure_signature: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
+    procedure_success_count: z.number().int().nonnegative().max(10_000).optional(),
+    procedure_success_sessions: z.array(z.string().trim().min(1).max(256)).max(128).optional(),
+    procedure_promotion_status: z.enum(['candidate', 'promoted', 'rejected']).optional(),
+    recall_positive_count: z.number().int().nonnegative().max(1_000_000).optional(),
+    recall_negative_count: z.number().int().nonnegative().max(1_000_000).optional(),
+    recall_neutral_count: z.number().int().nonnegative().max(1_000_000).optional(),
+    recall_feedback_at: z.string().datetime().optional(),
     is_secret: z.boolean().default(false), // legacy compatibility only
   })
   .passthrough();

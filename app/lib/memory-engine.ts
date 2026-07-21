@@ -19,6 +19,11 @@ import {
 import { ConflictError, StorageError, ValidationError } from './errors';
 import { rankHybrid } from './hybrid-retrieval';
 import { buildKnowledgeMemories } from './knowledge-ingestion';
+import {
+  RecallFeedbackRequest,
+  RecallFeedbackRequestSchema,
+  RecallFeedbackResult,
+} from './recall-feedback';
 import { buildMutationPlan } from './memory-mutation';
 import { buildMaintenanceReport } from './memory-maintainer';
 import { EmbeddingResult, getEmbedding, getEmbeddings } from './neural-embedding';
@@ -31,6 +36,7 @@ import {
   MemorySnapshotSchema,
   MemoryType,
   normalizeNamespace,
+  NormalizedRememberRequest,
   RecallRequest,
   RememberRequest,
   RememberRequestSchema,
@@ -505,11 +511,41 @@ export class MemoryEngine {
     });
   }
 
+  private validateRememberInput(parsed: NormalizedRememberRequest): { namespace: string; type: MemoryType } {
+    const namespace = normalizeNamespace(parsed.namespace);
+    const type = parsed.type || this.inferType(parsed.content);
+    // This must run before any embedding or semantic-expansion provider sees
+    // the content. Persistence rejection after provider processing is too late.
+    assertMemorySafe(parsed.content, type);
+    return { namespace, type };
+  }
+
+  private async findIdempotentMemory(
+    parsed: NormalizedRememberRequest,
+    namespace: string,
+  ): Promise<Memory | undefined> {
+    if (!parsed.idempotency_key) return undefined;
+    await this.ensureReady(namespace);
+    const cached = this.store.getIdempotent<Memory>(parsed.idempotency_key, 'remember');
+    if (cached) return MemorySchema.parse(cached);
+    if (!this.cloudMode || !this.driveBackup) return undefined;
+    const eventId = deterministicEventId(namespace, 'memory_created', parsed.idempotency_key);
+    const priorEvent = await this.driveBackup.findCloudEvent(namespace, eventId);
+    const priorMemory = priorEvent?.changes.find(change => change.operation === 'upsert');
+    if (priorMemory?.operation !== 'upsert') return undefined;
+    const current = this.store.get(priorMemory.memory.id, namespace, true) || priorMemory.memory;
+    const memory = MemorySchema.parse(current);
+    this.store.putIdempotent(parsed.idempotency_key, 'remember', memory);
+    return memory;
+  }
+
   async remember(request: RememberRequest): Promise<Memory> {
     const parsed = RememberRequestSchema.parse(request);
-    const namespace = normalizeNamespace(parsed.namespace);
+    const { namespace } = this.validateRememberInput(parsed);
+    const idempotent = await this.findIdempotentMemory(parsed, namespace);
+    if (idempotent) return idempotent;
     // External embedding latency must not consume the distributed write lease.
-    // Idempotency/deduplication is still rechecked after the lease is acquired.
+    // Idempotency/deduplication and safety are rechecked after lease acquisition.
     const preparedEmbedding = await getEmbedding(parsed.content);
     return this.withCloudWrite(
       namespace,
@@ -518,7 +554,7 @@ export class MemoryEngine {
     );
   }
 
-  private async rememberUnlocked(parsed: RememberRequest, preparedEmbedding?: EmbeddingResult): Promise<Memory> {
+  private async rememberUnlocked(parsed: NormalizedRememberRequest, preparedEmbedding?: EmbeddingResult): Promise<Memory> {
     const namespace = normalizeNamespace(parsed.namespace);
     await this.ensureReady(namespace);
     const type = parsed.type || this.inferType(parsed.content);
@@ -556,14 +592,31 @@ export class MemoryEngine {
         ...(parsed.metadata?.tags || []),
         ...(await this.autoTag(parsed.content)),
       ], 128);
+      const incomingValidated = parsed.metadata?.deterministic_validation === 'passed';
       const isProcedureCandidate = type === 'procedure'
+        && incomingValidated
         && mergedTags.includes('validated-procedure-candidate');
-      const previousProcedureSuccesses = Number(existing.metadata.procedure_success_count || 0);
-      const incomingProcedureSuccesses = Number(parsed.metadata?.procedure_success_count || 0);
+      const existingSessions = Array.isArray(existing.metadata.procedure_success_sessions)
+        ? existing.metadata.procedure_success_sessions
+        : [];
+      const incomingSessions = Array.isArray(parsed.metadata?.procedure_success_sessions)
+        ? parsed.metadata.procedure_success_sessions
+        : [];
+      const provenanceSession = parsed.metadata?.provenance?.session_id;
+      const validatedSessions = uniqueStrings([
+        ...existingSessions,
+        ...(incomingValidated ? incomingSessions : []),
+        ...(incomingValidated && provenanceSession ? [provenanceSession] : []),
+      ], 128);
+      const previousProcedureSuccesses = Math.max(
+        Number(existing.metadata.procedure_success_count || 0),
+        existingSessions.length,
+      );
       const procedureSuccessCount = isProcedureCandidate
-        ? Math.max(1, previousProcedureSuccesses) + Math.max(1, incomingProcedureSuccesses)
-        : Math.max(previousProcedureSuccesses, incomingProcedureSuccesses);
-      const procedurePromoted = isProcedureCandidate && procedureSuccessCount >= 3;
+        ? Math.max(previousProcedureSuccesses, validatedSessions.length)
+        : previousProcedureSuccesses;
+      const procedurePromoted = (existing.metadata.procedure_promotion_status === 'promoted')
+        || (isProcedureCandidate && procedureSuccessCount >= 3);
       const updated = await this.editUnlocked(existing.id, {
         content: parsed.content.length > existing.content.length ? parsed.content : existing.content,
         metadata: {
@@ -581,6 +634,8 @@ export class MemoryEngine {
             ...(procedurePromoted ? ['validated-procedure', 'procedure-promoted'] : []),
           ], 128),
           procedure_success_count: procedureSuccessCount || undefined,
+          procedure_success_sessions: validatedSessions.length ? validatedSessions : undefined,
+          deterministic_validation: procedurePromoted ? 'passed' : parsed.metadata?.deterministic_validation,
           procedure_promotion_status: procedurePromoted
             ? 'promoted'
             : isProcedureCandidate
@@ -664,24 +719,32 @@ export class MemoryEngine {
     if (!requests.length) return [];
     const maxBatch = this.cloudMode ? 100 : 250;
     if (requests.length > maxBatch) throw new ConflictError(`Batch exceeds ${maxBatch} memories`);
-    const parsed = requests.map((request, index) => ({
-      index,
-      request: RememberRequestSchema.parse(request),
-    }));
+    const parsed = requests.map((request, index) => {
+      const normalized = RememberRequestSchema.parse(request);
+      const { namespace } = this.validateRememberInput(normalized);
+      return { index, namespace, request: normalized };
+    });
     const groups = new Map<string, typeof parsed>();
     for (const item of parsed) {
-      const namespace = normalizeNamespace(item.request.namespace);
-      const group = groups.get(namespace) || [];
+      const group = groups.get(item.namespace) || [];
       group.push(item);
-      groups.set(namespace, group);
+      groups.set(item.namespace, group);
     }
 
     const results = new Array<Memory>(requests.length);
     for (const [namespace, group] of groups) {
-      const embeddings = await getEmbeddings(group.map(item => item.request.content));
+      const pending: typeof group = [];
+      for (const item of group) {
+        const idempotent = await this.findIdempotentMemory(item.request, namespace);
+        if (idempotent) results[item.index] = idempotent;
+        else pending.push(item);
+      }
+      if (!pending.length) continue;
+
+      const embeddings = await getEmbeddings(pending.map(item => item.request.content));
       await this.withCloudWrite(namespace, 'memory_batch_created', async () => {
-        for (let groupIndex = 0; groupIndex < group.length; groupIndex += 1) {
-          const item = group[groupIndex];
+        for (let groupIndex = 0; groupIndex < pending.length; groupIndex += 1) {
+          const item = pending[groupIndex];
           results[item.index] = await this.rememberUnlocked(item.request, embeddings[groupIndex]);
         }
       }, { deferEvents: true });
@@ -728,6 +791,107 @@ export class MemoryEngine {
   async recall(request: RecallRequest): Promise<Memory[]> {
     const scored = await this.recallWithQuality(request);
     return scored.map(memory => MemorySchema.parse(memory));
+  }
+
+  async recordRecallFeedback(raw: RecallFeedbackRequest): Promise<RecallFeedbackResult> {
+    const request = RecallFeedbackRequestSchema.parse(raw);
+    const namespace = normalizeNamespace(request.namespace);
+    const operation = 'recall-feedback';
+    const cached = this.store.getIdempotent<RecallFeedbackResult>(request.feedback_id, operation);
+    if (cached) return { ...cached, deduplicated: true };
+
+    if (this.cloudMode && this.driveBackup) {
+      await this.ensureReady(namespace);
+      const eventId = deterministicEventId(namespace, 'memory_feedback_recorded', request.feedback_id);
+      const priorEvent = await this.driveBackup.findCloudEvent(namespace, eventId);
+      if (priorEvent) {
+        const updatedIds = priorEvent.changes
+          .filter(change => change.operation === 'upsert')
+          .map(change => change.operation === 'upsert' ? change.memory.id : '')
+          .filter(Boolean);
+        const result: RecallFeedbackResult = {
+          feedback_id: request.feedback_id,
+          namespace,
+          outcome: request.outcome,
+          requested: request.memory_ids.length,
+          updated: updatedIds.length,
+          missing: request.memory_ids.filter(id => !updatedIds.includes(id)),
+          deduplicated: true,
+          updated_at: priorEvent.occurred_at,
+        };
+        this.store.putIdempotent(request.feedback_id, operation, result);
+        return result;
+      }
+    }
+
+    const result = await this.withCloudWrite(namespace, 'memory_feedback_recorded', async () => {
+      await this.ensureReady(namespace);
+      const updatedAt = new Date().toISOString();
+      const missing: string[] = [];
+      const changed: Memory[] = [];
+      this.store.transaction(() => {
+        for (const id of request.memory_ids) {
+          const current = this.store.get(id, namespace, true);
+          if (!current || current.type === 'credential' || current.metadata.is_secret) {
+            missing.push(id);
+            continue;
+          }
+          const metadata = MemoryMetadataSchema.parse({
+            ...current.metadata,
+            version: (current.metadata.version || 1) + 1,
+            recall_positive_count: Number(current.metadata.recall_positive_count || 0)
+              + (request.outcome === 'helpful' ? 1 : 0),
+            recall_negative_count: Number(current.metadata.recall_negative_count || 0)
+              + (request.outcome === 'not_helpful' ? 1 : 0),
+            recall_neutral_count: Number(current.metadata.recall_neutral_count || 0)
+              + (request.outcome === 'unused' ? 1 : 0),
+            recall_feedback_at: updatedAt,
+          });
+          const next = MemorySchema.parse({
+            ...current,
+            metadata,
+            updated_at: updatedAt,
+          });
+          const stored = this.store.update(next, current.metadata.version || 1);
+          changed.push(stored);
+          this.store.appendAudit({
+            action: 'memory_feedback_recorded',
+            namespace,
+            memoryId: stored.id,
+            requestId: request.run_id,
+            details: {
+              feedback_id: request.feedback_id,
+              outcome: request.outcome,
+              source: request.source,
+              session_id: request.session_id,
+            },
+          });
+        }
+      });
+      if (changed.length) {
+        await this.persistCloudChanges({
+          namespace,
+          action: 'memory_feedback_recorded',
+          idempotencyKey: request.feedback_id,
+          requestId: request.run_id,
+          actor: request.source,
+          changes: changed.map(memory => ({ operation: 'upsert' as const, memory })),
+        });
+      }
+      return {
+        feedback_id: request.feedback_id,
+        namespace,
+        outcome: request.outcome,
+        requested: request.memory_ids.length,
+        updated: changed.length,
+        missing,
+        deduplicated: false,
+        updated_at: updatedAt,
+      } satisfies RecallFeedbackResult;
+    }, { deferEvents: true });
+
+    this.store.putIdempotent(request.feedback_id, operation, result);
+    return result;
   }
 
   async recallWithQuality(request: RecallRequest): Promise<ScoredMemory[]> {

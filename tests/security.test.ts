@@ -189,6 +189,62 @@ test('unexpected provider errors log bounded status metadata without their messa
   assert.equal(rendered.includes("provider_code: 'E_PROVIDER'"), true);
 });
 
+test('secret validation runs before embedding or semantic-expansion providers', async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'zenos-provider-boundary-test-'));
+  const store = new SqliteMemoryStore(path.join(directory, 'memory.sqlite'));
+  const engine = new MemoryEngine({ store, driveBackup: null });
+  const originalFetch = globalThis.fetch;
+  const previous = {
+    baseUrl: process.env.MEMORY_EMBEDDING_BASE_URL,
+    apiKey: process.env.MEMORY_EMBEDDING_API_KEY,
+    model: process.env.MEMORY_EMBEDDING_MODEL,
+  };
+  let providerCalls = 0;
+  globalThis.fetch = (async () => {
+    providerCalls += 1;
+    throw new Error('embedding provider must not be called');
+  }) as typeof fetch;
+  process.env.MEMORY_EMBEDDING_BASE_URL = 'https://embedding.invalid/v1';
+  process.env.MEMORY_EMBEDDING_API_KEY = 'test-provider-key';
+  process.env.MEMORY_EMBEDDING_MODEL = 'test-embedding-model';
+  try {
+    await assert.rejects(
+      () => engine.remember({
+        content: 'password=never-send-this-to-a-provider',
+        namespace: 'security-provider-boundary',
+        type: 'fact',
+      }),
+      SensitiveDataError,
+    );
+    await assert.rejects(
+      () => engine.rememberBatch([
+        {
+          content: 'A normal durable project decision.',
+          namespace: 'security-provider-boundary',
+          type: 'decision',
+        },
+        {
+          content: 'api_key=never-send-this-batch-to-a-provider',
+          namespace: 'security-provider-boundary',
+          type: 'fact',
+        },
+      ]),
+      SensitiveDataError,
+    );
+    assert.equal(providerCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previous.baseUrl === undefined) delete process.env.MEMORY_EMBEDDING_BASE_URL;
+    else process.env.MEMORY_EMBEDDING_BASE_URL = previous.baseUrl;
+    if (previous.apiKey === undefined) delete process.env.MEMORY_EMBEDDING_API_KEY;
+    else process.env.MEMORY_EMBEDDING_API_KEY = previous.apiKey;
+    if (previous.model === undefined) delete process.env.MEMORY_EMBEDDING_MODEL;
+    else process.env.MEMORY_EMBEDDING_MODEL = previous.model;
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('raw assigned secrets are rejected while vault references are accepted', async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'zenos-security-test-'));
   const store = new SqliteMemoryStore(path.join(directory, 'memory.sqlite'));

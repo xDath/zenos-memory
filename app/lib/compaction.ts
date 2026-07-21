@@ -11,7 +11,7 @@ export const CompactMessageSchema = z.object({
 });
 
 export const CompactRequestSchema = z.object({
-  messages: z.array(CompactMessageSchema).min(1),
+  messages: z.array(CompactMessageSchema).min(1).max(400),
   namespace: z.string().optional().default('zenos'),
   reason: z.string().optional().default('auto-compact'),
   approx_tokens: z.number().int().positive().optional(),
@@ -20,6 +20,27 @@ export const CompactRequestSchema = z.object({
   max_chars: z.number().int().positive().max(24000).optional().default(10000),
   input_max_chars: z.number().int().positive().max(500000).optional(),
   mode: z.enum(['deterministic', 'advanced', 'dag']).optional().default('dag'),
+}).superRefine((request, context) => {
+  const aggregateLimit = request.input_max_chars || 120_000;
+  let aggregateChars = 0;
+  for (const [index, message] of request.messages.entries()) {
+    const chars = normalizeContent(message.content).length;
+    aggregateChars += chars;
+    if (chars > 32_000) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['messages', index, 'content'],
+        message: 'Compact message content exceeds 32,000 normalized characters',
+      });
+    }
+  }
+  if (aggregateChars > aggregateLimit) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['messages'],
+      message: `Compact source exceeds input_max_chars (${aggregateChars} > ${aggregateLimit})`,
+    });
+  }
 });
 
 export const BootstrapRequestSchema = z.object({

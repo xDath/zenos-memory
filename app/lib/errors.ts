@@ -32,6 +32,12 @@ export class ValidationError extends AppError {
   }
 }
 
+export class PayloadTooLargeError extends AppError {
+  constructor(message = 'Request body exceeds the allowed size', details?: Record<string, unknown>) {
+    super(message, { code: 'PAYLOAD_TOO_LARGE', status: 413, expose: true, details });
+  }
+}
+
 export class SensitiveDataError extends AppError {
   constructor(message = 'Raw credentials and secrets cannot be stored in Zenos Memory') {
     super(message, { code: 'SENSITIVE_DATA_REJECTED', status: 422, expose: true });

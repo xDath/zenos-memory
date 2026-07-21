@@ -249,6 +249,23 @@ test('compact and bootstrap enforce read/write scopes and preserve bounded hando
   assert.ok(Array.isArray(bootstrapBody.sources));
 });
 
+test('compact rejects oversized request bodies before JSON processing', async () => {
+  const writeToken = issueEtlaToken(secret, { scopes: ['memory:write'], subject: 'route-contract' });
+  const oversizedBody = JSON.stringify({
+    messages: [{ role: 'user', content: 'x'.repeat(770_000) }],
+    namespace: 'route-contract',
+    mode: 'dag',
+  });
+  const response = await compactPost(request('/api/memory/compact', {
+    token: writeToken,
+    body: oversizedBody,
+  }));
+  const body = await json(response);
+
+  assert.equal(response.status, 413);
+  assert.equal(body.error?.code, 'PAYLOAD_TOO_LARGE');
+});
+
 test('route-level rate limits return a stable 429 contract before body parsing', async () => {
   const writeToken = issueEtlaToken(secret, { scopes: ['memory:write'], subject: 'route-contract' });
   let last: Response | undefined;

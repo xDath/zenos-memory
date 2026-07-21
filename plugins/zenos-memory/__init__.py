@@ -45,6 +45,7 @@ def _load_config() -> dict:
         "salience_batch_size": 4,
         "salience_flush_seconds": 30,
         "salience_spool_path": str(get_hermes_home() / "state" / "zenos-memory-salience-spool.json"),
+        "compact_spool_path": str(get_hermes_home() / "state" / "zenos-memory-compact-spool.json"),
     }
     path = get_hermes_home() / "zenos-memory.json"
     if path.exists():
@@ -62,6 +63,7 @@ def _load_config() -> dict:
         "salience_batch_size": os.environ.get("ZENOS_MEMORY_SALIENCE_BATCH_SIZE"),
         "salience_flush_seconds": os.environ.get("ZENOS_MEMORY_SALIENCE_FLUSH_SECONDS"),
         "salience_spool_path": os.environ.get("ZENOS_MEMORY_SALIENCE_SPOOL_PATH"),
+        "compact_spool_path": os.environ.get("ZENOS_MEMORY_COMPACT_SPOOL_PATH"),
     }
     cfg.update({key: value for key, value in environment_overrides.items() if value not in (None, "")})
     return cfg
@@ -91,6 +93,39 @@ def _continuity_fingerprint(messages: list[dict], limit: int = 80) -> str:
         for message in bounded
     )
     return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def _bounded_compact_messages(
+    messages: list[dict],
+    *,
+    max_messages: int = 80,
+    max_chars: int = 115_000,
+    max_message_chars: int = 12_000,
+) -> list[dict]:
+    """Build a provider-safe compact source without exceeding API hard limits."""
+    selected: list[dict] = []
+    used = 0
+    for message in reversed(messages[-max(1, min(max_messages, 80)):]):
+        role = str(message.get("role") or "unknown").strip().lower()[:80]
+        content = _stable_message_content(message.get("content"))[:max_message_chars]
+        if not content:
+            continue
+        cost = len(content)
+        if selected and used + cost > max_chars:
+            continue
+        if not selected and cost > max_chars:
+            content = content[:max_chars]
+            cost = len(content)
+        selected.append({
+            "role": role,
+            "content": content,
+            **({"name": str(message.get("name"))[:200]} if message.get("name") else {}),
+            **({"tool_call_id": str(message.get("tool_call_id"))[:500]} if message.get("tool_call_id") else {}),
+        })
+        used += cost
+        if used >= max_chars:
+            break
+    return list(reversed(selected))
 
 
 def _deterministic_continuity_checkpoint(messages: list[dict], max_chars: int = 8_000) -> str:
@@ -186,7 +221,8 @@ class ZenosMemoryProvider(MemoryProvider):
         self._namespace = DEFAULT_NAMESPACE
         self._session_id = ""
         self._auto_compact_max_messages = 80
-        self._last_compact_message_count = 0
+        self._last_compact_fingerprint = ""
+        self._compact_generation = 0
         self._salience_batch_size = 4
         self._salience_flush_seconds = 30
         self._salience_buffer: list[dict] = []
@@ -198,6 +234,8 @@ class ZenosMemoryProvider(MemoryProvider):
         self._token_cache: dict[str, tuple[str, float]] = {}
         self._token_lock = threading.Lock()
         self._compact_inflight: set[str] = set()
+        self._compact_jobs: dict[str, dict] = {}
+        self._compact_spool_path = Path("zenos-memory-compact-spool.json")
         self._compact_lock = threading.Lock()
 
     def is_available(self) -> bool:
@@ -245,13 +283,17 @@ class ZenosMemoryProvider(MemoryProvider):
         self._salience_batch_size = max(2, min(int(self._cfg.get("salience_batch_size") or 4), 8))
         self._salience_flush_seconds = max(5, min(int(self._cfg.get("salience_flush_seconds") or 30), 300))
         self._salience_spool_path = Path(str(self._cfg.get("salience_spool_path") or "zenos-memory-salience-spool.json"))
+        self._compact_spool_path = Path(str(self._cfg.get("compact_spool_path") or "zenos-memory-compact-spool.json"))
         with self._salience_lock:
             self._salience_buffer = self._load_salience_spool()
         self._last_salience_flush = time.monotonic()
-        self._last_compact_message_count = 0
+        self._last_compact_fingerprint = ""
+        self._compact_generation = 0
         with self._compact_lock:
             self._compact_inflight.clear()
+            self._compact_jobs = self._load_compact_spool()
         self._start_salience_timer()
+        self._retry_compact_spool()
 
     def _load_salience_spool(self) -> list[dict]:
         try:
@@ -273,9 +315,69 @@ class ZenosMemoryProvider(MemoryProvider):
         os.chmod(temporary, 0o600)
         os.replace(temporary, path)
 
+    def _load_compact_spool(self) -> dict[str, dict]:
+        try:
+            if not self._compact_spool_path.exists():
+                return {}
+            raw = json.loads(self._compact_spool_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, list):
+                raise ValueError("compact spool must contain a JSON array")
+            jobs: dict[str, dict] = {}
+            for item in raw[-64:]:
+                if not isinstance(item, dict):
+                    continue
+                fingerprint = str(item.get("fingerprint") or "").strip()
+                messages = item.get("messages")
+                if not fingerprint or not isinstance(messages, list):
+                    continue
+                jobs[fingerprint] = item
+            return jobs
+        except Exception:
+            logger.exception("Failed to load durable Zenos Memory compact spool")
+            return {}
+
+    def _persist_compact_spool_locked(self) -> None:
+        try:
+            path = self._compact_spool_path
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            jobs = sorted(
+                self._compact_jobs.values(),
+                key=lambda item: str(item.get("created_at") or ""),
+            )[-64:]
+            temporary.write_text(json.dumps(jobs, ensure_ascii=False), encoding="utf-8")
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+        except FileNotFoundError:
+            # Normal during profile/test teardown after the async request was
+            # already launched. The in-memory job remains pending.
+            logger.debug("Compact spool path disappeared during shutdown")
+        except Exception:
+            # The in-memory job remains pending. Never let a spool filesystem
+            # failure crash a Hermes compression callback/background thread.
+            logger.exception("Failed to persist durable Zenos Memory compact spool")
+
+    def _retry_compact_spool(self) -> None:
+        current_time = time.time()
+        with self._compact_lock:
+            jobs = []
+            for item in self._compact_jobs.values():
+                fingerprint = str(item.get("fingerprint") or "")
+                if not fingerprint or fingerprint in self._compact_inflight:
+                    continue
+                attempts = max(0, int(item.get("attempts") or 0))
+                last_attempt = float(item.get("last_attempt_at") or 0)
+                retry_after = min(3600, 30 * (2 ** min(attempts, 7)))
+                if last_attempt and current_time - last_attempt < retry_after:
+                    continue
+                jobs.append(dict(item))
+        for job in jobs[:8]:
+            self._start_cloud_compact_job(job)
+
     def _salience_timer_loop(self) -> None:
         while not self._salience_stop.wait(self._salience_flush_seconds):
             self._flush_salience_buffer(force=True)
+            self._retry_compact_spool()
 
     def _start_salience_timer(self) -> None:
         self._salience_stop = threading.Event()
@@ -634,39 +736,33 @@ class ZenosMemoryProvider(MemoryProvider):
         ]
         return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
 
-    def _queue_cloud_compact(
-        self,
-        bounded: list[dict],
-        *,
-        fingerprint: str,
-        approx_tokens: int,
-    ) -> None:
-        """Persist a rich cloud compact asynchronously outside Hermes' hot path."""
-        if not self._secret:
+    def _start_cloud_compact_job(self, raw_job: dict) -> None:
+        fingerprint = str(raw_job.get("fingerprint") or "").strip()
+        if not self._secret or not fingerprint:
             return
         with self._compact_lock:
             if fingerprint in self._compact_inflight:
                 return
+            job = dict(self._compact_jobs.get(fingerprint) or raw_job)
             self._compact_inflight.add(fingerprint)
 
-        namespace = self._namespace
-        session_id = self._session_id
-        messages = [dict(message) for message in bounded]
-        idempotency_digest = hashlib.sha256(
-            f"{namespace}\n{fingerprint}".encode("utf-8")
-        ).hexdigest()
-
         def _run() -> None:
+            succeeded = False
             try:
+                namespace = str(job.get("namespace") or self._namespace)
+                generation = int(job.get("generation") or 1)
+                idempotency_digest = hashlib.sha256(
+                    f"{namespace}\n{fingerprint}".encode("utf-8")
+                ).hexdigest()
                 result = self._request(
                     "POST",
                     "/api/memory/compact",
                     {
-                        "messages": messages,
+                        "messages": list(job.get("messages") or []),
                         "namespace": namespace,
-                        "reason": "hermes-pre-compress-async",
-                        "session_id": session_id,
-                        "approx_tokens": approx_tokens,
+                        "reason": f"hermes-pre-compress-generation:{generation}",
+                        "session_id": str(job.get("session_id") or ""),
+                        "approx_tokens": max(1, int(job.get("approx_tokens") or 1)),
                         "max_chars": 8000,
                         "input_max_chars": 120000,
                         "mode": "dag",
@@ -681,24 +777,31 @@ class ZenosMemoryProvider(MemoryProvider):
                 ).strip()
                 coverage = result.get("coverage") or {}
                 if not compact or coverage.get("goal") is not True:
-                    logger.warning(
-                        "Async Zenos compact stored no goal-complete cloud checkpoint"
-                    )
-                else:
-                    logger.debug(
-                        "Async Zenos cloud compact persisted fingerprint=%s chars=%d",
-                        fingerprint[:12],
-                        len(compact),
-                    )
+                    raise RuntimeError("cloud checkpoint was not goal-complete")
+                succeeded = True
+                logger.debug(
+                    "Async Zenos cloud compact persisted generation=%d fingerprint=%s chars=%d",
+                    generation,
+                    fingerprint[:12],
+                    len(compact),
+                )
             except Exception as error:
-                # Local deterministic state was already returned to Hermes, so
-                # a cloud outage cannot stall or corrupt the active task.
                 logger.warning(
-                    "Async Zenos cloud compact failed; local continuation remains authoritative: %s",
+                    "Async Zenos cloud compact failed; durable local spool will retry: %s",
                     error,
                 )
+                with self._compact_lock:
+                    current = dict(self._compact_jobs.get(fingerprint) or job)
+                    current["attempts"] = int(current.get("attempts") or 0) + 1
+                    current["last_error"] = str(error)[:500]
+                    current["last_attempt_at"] = time.time()
+                    self._compact_jobs[fingerprint] = current
+                    self._persist_compact_spool_locked()
             finally:
                 with self._compact_lock:
+                    if succeeded:
+                        self._compact_jobs.pop(fingerprint, None)
+                        self._persist_compact_spool_locked()
                     self._compact_inflight.discard(fingerprint)
 
         threading.Thread(
@@ -706,6 +809,34 @@ class ZenosMemoryProvider(MemoryProvider):
             name=f"zenos-memory-compact-{fingerprint[:8]}",
             daemon=True,
         ).start()
+
+    def _queue_cloud_compact(
+        self,
+        bounded: list[dict],
+        *,
+        fingerprint: str,
+        approx_tokens: int,
+        generation: int,
+    ) -> None:
+        """Durably spool rich cloud compaction outside Hermes' hot path."""
+        if not self._secret:
+            return
+        job = {
+            "fingerprint": fingerprint,
+            "messages": [dict(message) for message in bounded],
+            "namespace": self._namespace,
+            "session_id": self._session_id,
+            "approx_tokens": approx_tokens,
+            "generation": generation,
+            "attempts": 0,
+            "created_at": time.time(),
+        }
+        with self._compact_lock:
+            if fingerprint not in self._compact_jobs:
+                self._compact_jobs[fingerprint] = job
+                self._persist_compact_spool_locked()
+            job = dict(self._compact_jobs[fingerprint])
+        self._start_cloud_compact_job(job)
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
         """Return local active-state continuity immediately and sync cloud later.
@@ -719,15 +850,24 @@ class ZenosMemoryProvider(MemoryProvider):
         """
         if not messages:
             return ""
-        message_count = len(messages)
-        if self._last_compact_message_count and message_count - self._last_compact_message_count < 12:
+        bounded = _bounded_compact_messages(
+            messages,
+            max_messages=self._auto_compact_max_messages,
+        )
+        if not bounded:
             return ""
-        bounded = messages[-min(self._auto_compact_max_messages, 80):]
+        fingerprint = _continuity_fingerprint(bounded)
+        if fingerprint == self._last_compact_fingerprint:
+            return ""
+        self._compact_generation += 1
+        generation = self._compact_generation
         input_chars = sum(len(str(message.get("content", ""))) for message in bounded)
         approx_tokens = max(1, input_chars // 4)
-        deterministic_checkpoint = _deterministic_continuity_checkpoint(bounded, max_chars=8_000)
-        fingerprint = _continuity_fingerprint(bounded)
-        self._last_compact_message_count = message_count
+        deterministic_checkpoint = (
+            f"[Zenos pressure generation {generation}; fingerprint={fingerprint[:16]}]\n\n"
+            + _deterministic_continuity_checkpoint(bounded, max_chars=7_800)
+        )[:8_000]
+        self._last_compact_fingerprint = fingerprint
 
         # Neither salient-memory flushing nor cloud compaction may consume the
         # compression critical path. Both are best-effort background durability.
@@ -741,6 +881,7 @@ class ZenosMemoryProvider(MemoryProvider):
                 bounded,
                 fingerprint=fingerprint,
                 approx_tokens=approx_tokens,
+                generation=generation,
             )
 
         return deterministic_checkpoint

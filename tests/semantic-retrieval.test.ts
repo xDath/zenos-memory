@@ -67,6 +67,98 @@ test('same-space dense vectors retrieve a paraphrase without lexical overlap', (
   assert.ok(ranked[0].signals.vector > ranked[1].signals.vector);
 });
 
+test('bounded recall feedback can rerank otherwise equivalent evidence', () => {
+  const baseVector = [1, 0, 0, 0, 0, 0, 0, 0];
+  const helpfulBase = memory(
+    'aaaa1111-1111-4111-8111-111111111111',
+    'Verified rollback procedure for production deployment alpha safeguard.',
+    baseVector,
+    'dense:test:8',
+  );
+  const helpful = MemorySchema.parse({
+    ...helpfulBase,
+    metadata: {
+      ...helpfulBase.metadata,
+      recall_positive_count: 12,
+      recall_negative_count: 0,
+    },
+  });
+  const harmfulBase = memory(
+    'bbbb2222-2222-4222-8222-222222222222',
+    'Verified rollback procedure for production deployment beta fallback.',
+    baseVector,
+    'dense:test:8',
+  );
+  const harmful = MemorySchema.parse({
+    ...harmfulBase,
+    metadata: {
+      ...harmfulBase.metadata,
+      recall_positive_count: 0,
+      recall_negative_count: 12,
+    },
+  });
+
+  const ranked = rankHybrid(
+    'verified rollback procedure production deployment',
+    [harmful, helpful],
+    2,
+    { vector: baseVector, space: 'dense:test:8' },
+  );
+
+  assert.equal(ranked[0].memory.id, helpful.id);
+  assert.ok(ranked[0].signals.usefulness > ranked[1].signals.usefulness);
+  assert.ok(ranked[0].score > ranked[1].score);
+});
+
+test('recall feedback is idempotent and updates counters without provider calls', async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'zenos-feedback-engine-'));
+  const store = new SqliteMemoryStore(path.join(directory, 'memory.sqlite'));
+  const engine = new MemoryEngine({ store, driveBackup: null });
+  const originalFetch = global.fetch;
+  let providerCalls = 0;
+  global.fetch = (async () => {
+    providerCalls += 1;
+    throw new Error('feedback must not call a provider');
+  }) as typeof fetch;
+  try {
+    const created = await engine.remember({
+      namespace: 'feedback-test',
+      type: 'decision',
+      content: 'Use the deterministic rollback procedure for production deployment.',
+    });
+    providerCalls = 0;
+    const first = await engine.recordRecallFeedback({
+      feedback_id: 'feedback-run-00000001',
+      namespace: 'feedback-test',
+      outcome: 'helpful',
+      memory_ids: [created.id],
+      run_id: 'run-feedback-1',
+      session_id: 'session-feedback-1',
+      source: 'runtime-outcome',
+    });
+    const replay = await engine.recordRecallFeedback({
+      feedback_id: 'feedback-run-00000001',
+      namespace: 'feedback-test',
+      outcome: 'helpful',
+      memory_ids: [created.id],
+      run_id: 'run-feedback-1',
+      session_id: 'session-feedback-1',
+      source: 'runtime-outcome',
+    });
+    const updated = (await engine.list('feedback-test', 10)).find(item => item.id === created.id);
+
+    assert.equal(first.updated, 1);
+    assert.equal(first.deduplicated, false);
+    assert.equal(replay.deduplicated, true);
+    assert.equal(updated?.metadata.recall_positive_count, 1);
+    assert.equal(providerCalls, 0);
+  } finally {
+    global.fetch = originalFetch;
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('mismatched embedding spaces never compare truncated vectors', () => {
   const lexical = memory(
     '33333333-3333-4333-8333-333333333333',

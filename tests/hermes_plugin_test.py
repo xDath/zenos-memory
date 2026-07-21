@@ -53,6 +53,7 @@ class ZenosMemoryPluginTests(unittest.TestCase):
         provider._salience_batch_size = 2
         provider._salience_flush_seconds = 300
         provider._salience_spool_path = Path(self._temporary_directory.name) / "salience-spool.json"
+        provider._compact_spool_path = Path(self._temporary_directory.name) / "compact-spool.json"
         return provider
 
     def test_cross_language_continuity_fingerprint(self):
@@ -156,7 +157,40 @@ class ZenosMemoryPluginTests(unittest.TestCase):
         self.assertIn("Pending work:", checkpoint)
         self.assertIn("Failures:", checkpoint)
         self.assertIn("/srv/etla/workspaces/zenos-runtime", checkpoint)
-        self.assertEqual(provider._last_compact_message_count, len(messages))
+        self.assertEqual(provider._compact_generation, 1)
+        self.assertEqual(provider._last_compact_fingerprint, PLUGIN._continuity_fingerprint(
+            PLUGIN._bounded_compact_messages(messages, max_messages=provider._auto_compact_max_messages)
+        ))
+        self.assertEqual(provider.on_pre_compress(messages), "")
+
+        # In-place compression may reduce message count. A changed fingerprint,
+        # not monotonic message count, owns the next pressure generation.
+        reduced = [
+            {"role": "user", "content": "Tetap lanjutkan root task yang sama."},
+            {"role": "assistant", "content": "Validation baru masih pending."},
+        ]
+        next_checkpoint = provider.on_pre_compress(reduced)
+        self.assertIn("Zenos pressure generation 2", next_checkpoint)
+        self.assertEqual(provider._compact_generation, 2)
+
+    def test_compact_spool_survives_process_loss_before_cloud_flush(self):
+        provider = self.provider()
+        provider._start_cloud_compact_job = lambda job: None
+        messages = [{"role": "user", "content": "Preserve this root objective across compression."}]
+        fingerprint = PLUGIN._continuity_fingerprint(messages)
+
+        provider._queue_cloud_compact(
+            messages,
+            fingerprint=fingerprint,
+            approx_tokens=20,
+            generation=1,
+        )
+
+        self.assertTrue(provider._compact_spool_path.exists())
+        restarted = self.provider()
+        restarted._compact_jobs = restarted._load_compact_spool()
+        self.assertIn(fingerprint, restarted._compact_jobs)
+        self.assertEqual(restarted._compact_jobs[fingerprint]["generation"], 1)
 
 
 if __name__ == "__main__":

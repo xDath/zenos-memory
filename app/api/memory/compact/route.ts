@@ -9,6 +9,7 @@ import {
   selectDurableUserGoal,
 } from '../../../lib/compaction';
 import { errorResponse, requestId } from '../../../lib/errors';
+import { readJsonBodyBounded } from '../../../lib/http-body';
 import { getMemoryEngine } from '../../../lib/memory-engine';
 import { compactWithLLM, hasMemoryLLM } from '../../../lib/memory-llm';
 import { redactSensitiveText, sanitizeUnknown } from '../../../lib/secrets';
@@ -161,7 +162,7 @@ export async function POST(request: NextRequest) {
   if (!validateApiKey(request)) return unauthorizedResponse();
   const id = requestId(request);
   try {
-    const parsed = CompactRequestSchema.parse(await request.json());
+    const parsed = CompactRequestSchema.parse(await readJsonBodyBounded(request, 768_000));
     const namespace = parsed.namespace || 'zenos';
     const deterministic = parsed.mode === 'dag'
       ? buildDagCompactSnapshot(parsed)
