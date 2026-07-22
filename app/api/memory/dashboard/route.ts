@@ -25,7 +25,10 @@ export async function GET(request: NextRequest) {
     const graph = buildTemporalGraph(memories);
     const readiness = productionReadiness(memories);
     const maintenance = buildMaintenanceReport(memories);
-    const service = await engine.readiness();
+    const [service, resourcePolicy] = await Promise.all([
+      engine.readiness(namespace),
+      engine.resourcePolicyStatus(),
+    ]);
     const byType = memories.reduce<Record<string, number>>((accumulator, memory) => {
       accumulator[memory.type] = (accumulator[memory.type] || 0) + 1;
       return accumulator;
@@ -38,6 +41,7 @@ export async function GET(request: NextRequest) {
         by_type: byType,
         data_quality: readiness,
         service_readiness: service,
+        resource_policy: resourcePolicy,
         graph: graph.stats,
         maintenance: maintenance.totals,
         top_entities: graph.nodes

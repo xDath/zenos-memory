@@ -15,6 +15,23 @@ import {
   validateCloudSnapshot,
 } from './cloud-events';
 import { ConflictError, StorageError } from './errors';
+import {
+  EventPackDescriptor,
+  EventPackDescriptorSchema,
+  EventPackManifest,
+  buildEventPackManifest,
+  decodeEventPack,
+  encodeEventPack,
+  validateEventPackManifest,
+} from './event-packs';
+import {
+  ResourceReservation,
+  ResourceUsage,
+  ResourceUsageSchema,
+  DriveStorageQuota,
+  emptyDailyUsage,
+  evaluateResourceReservation,
+} from './resource-policy';
 import { Memory, MemorySchema } from './schema';
 import { sanitizeUnknown } from './secrets';
 
@@ -48,6 +65,7 @@ export interface DriveLease {
 }
 
 const JSON_MIME = 'application/json';
+const GZIP_MIME = 'application/gzip';
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 const CLOUD_ROOT_NAME = 'zenos-memory-cloud';
 
@@ -261,6 +279,59 @@ export class GoogleDriveMemoryStore {
     return response.data.id;
   }
 
+  private async createBinaryFile(
+    parentId: string,
+    name: string,
+    payload: Buffer,
+    mimeType: string,
+    appProperties?: Record<string, string>,
+  ): Promise<string> {
+    const response = await this.drive.files.create({
+      supportsAllDrives: true,
+      requestBody: { name, parents: [parentId], mimeType, appProperties },
+      media: { mimeType, body: Readable.from([payload]) },
+      fields: 'id',
+    });
+    if (!response.data.id) throw new StorageError(`Drive did not return an id for file ${name}`);
+    return response.data.id;
+  }
+
+  private async createOrReuseBinaryFile(
+    parentId: string,
+    name: string,
+    payload: Buffer,
+    mimeType: string,
+    identity: Record<string, string>,
+  ): Promise<string> {
+    const matchesIdentity = (file: drive_v3.Schema$File) => Object.entries(identity)
+      .every(([key, value]) => file.appProperties?.[key] === value);
+    const canonical = (files: drive_v3.Schema$File[]) => files
+      .filter(file => Boolean(file.id) && matchesIdentity(file))
+      .sort((left, right) => {
+        const created = String(left.createdTime || '').localeCompare(String(right.createdTime || ''));
+        return created || String(left.id).localeCompare(String(right.id));
+      })[0]?.id;
+    const existing = canonical(await this.listChildren(parentId, {
+      mimeType,
+      orderBy: 'createdTime asc',
+    }));
+    if (existing) return existing;
+    const createdId = await this.createBinaryFile(parentId, name, payload, mimeType, identity);
+    const selected = canonical(await this.listChildren(parentId, {
+      mimeType,
+      orderBy: 'createdTime asc',
+    })) || createdId;
+    if (selected !== createdId) {
+      await this.drive.files.update({
+        supportsAllDrives: true,
+        fileId: createdId,
+        requestBody: { trashed: true },
+        fields: 'id',
+      }).catch(() => undefined);
+    }
+    return selected;
+  }
+
   private async createOrReuseJsonFile(
     parentId: string,
     name: string,
@@ -305,6 +376,25 @@ export class GoogleDriveMemoryStore {
       return response.data;
     } catch (error) {
       throw new StorageError(`Failed to read Drive file ${fileId}`, error);
+    }
+  }
+
+  private async readBinaryById(fileId: string): Promise<Buffer> {
+    try {
+      const response = await this.drive.files.get({
+        supportsAllDrives: true,
+        fileId,
+        alt: 'media',
+      }, { responseType: 'arraybuffer' });
+      if (Buffer.isBuffer(response.data)) return response.data;
+      if (response.data instanceof ArrayBuffer) return Buffer.from(response.data);
+      if (ArrayBuffer.isView(response.data)) {
+        return Buffer.from(response.data.buffer, response.data.byteOffset, response.data.byteLength);
+      }
+      if (typeof response.data === 'string') return Buffer.from(response.data, 'binary');
+      return Buffer.from(response.data as ArrayBuffer);
+    } catch (error) {
+      throw new StorageError(`Failed to read Drive binary file ${fileId}`, error);
     }
   }
 
@@ -353,6 +443,18 @@ export class GoogleDriveMemoryStore {
       this.ensureFolder(namespaceRoot, 'coordination'),
     ]);
     return { namespaceRoot, eventsRoot, snapshotsRoot, indexesRoot, coordinationRoot };
+  }
+
+  private async cloudPackFolders(namespace: string): Promise<{
+    packsRoot: string;
+    manifestsRoot: string;
+  }> {
+    const { namespaceRoot } = await this.cloudNamespaceFolders(namespace);
+    const [packsRoot, manifestsRoot] = await Promise.all([
+      this.ensureFolder(namespaceRoot, 'packs'),
+      this.ensureFolder(namespaceRoot, 'manifests'),
+    ]);
+    return { packsRoot, manifestsRoot };
   }
 
   private async findStructuredMemories(namespace: string): Promise<string | null> {
@@ -464,6 +566,134 @@ export class GoogleDriveMemoryStore {
     });
   }
 
+  private eventPackMode(): 'off' | 'shadow' | 'canary' | 'read' {
+    const mode = (process.env.ZENOS_MEMORY_EVENT_PACK_MODE || 'shadow').trim().toLowerCase();
+    return ['off', 'shadow', 'canary', 'read'].includes(mode)
+      ? mode as 'off' | 'shadow' | 'canary' | 'read'
+      : 'shadow';
+  }
+
+  private async latestEventPackManifest(namespace: string): Promise<EventPackManifest | null> {
+    const { manifestsRoot } = await this.cloudPackFolders(namespace);
+    const files = await this.listChildren(manifestsRoot, {
+      mimeType: JSON_MIME,
+      orderBy: 'createdTime desc',
+      pageSize: 20,
+      maxItems: 20,
+    });
+    for (const file of files) {
+      if (!file.id || file.appProperties?.format !== 'zenos-memory-event-pack-manifest-v1') continue;
+      try {
+        return validateEventPackManifest(await this.readJsonById(file.id));
+      } catch {
+        // Try an older immutable manifest if the newest upload is corrupt.
+      }
+    }
+    return null;
+  }
+
+  private async eventsFromPacksAfter(
+    namespace: string,
+    cursor: string | null,
+  ): Promise<{ events: CloudMemoryEvent[]; through_cursor: string | null; manifest: EventPackManifest | null }> {
+    const manifest = await this.latestEventPackManifest(namespace);
+    if (!manifest) return { events: [], through_cursor: cursor, manifest: null };
+    const descriptors = manifest.packs.filter((pack) => (
+      Boolean(pack.file_id)
+      && (!cursor || compareCloudCursor(pack.cursor_end, cursor) > 0)
+    ));
+    const events: CloudMemoryEvent[] = [];
+    for (const descriptor of descriptors) {
+      if (!descriptor.file_id) continue;
+      const decoded = decodeEventPack(await this.readBinaryById(descriptor.file_id), descriptor);
+      events.push(...decoded.filter((event) => (
+        !cursor || compareCloudCursor(cloudCursor(event.occurred_at, event.event_id), cursor) > 0
+      )));
+    }
+    const unique = new Map(events.map((event) => [event.event_id, event]));
+    const ordered = [...unique.values()].sort((left, right) => compareCloudCursor(
+      cloudCursor(left.occurred_at, left.event_id),
+      cloudCursor(right.occurred_at, right.event_id),
+    ));
+    return {
+      events: ordered,
+      through_cursor: ordered.length
+        ? cloudCursor(ordered.at(-1)!.occurred_at, ordered.at(-1)!.event_id)
+        : cursor,
+      manifest,
+    };
+  }
+
+  async createEventPackShadow(namespace: string): Promise<{
+    manifest: EventPackManifest | null;
+    pack_count: number;
+    event_count: number;
+    parity_verified: boolean;
+    mode: string;
+  }> {
+    const mode = this.eventPackMode();
+    if (mode === 'off') {
+      return { manifest: null, pack_count: 0, event_count: 0, parity_verified: true, mode };
+    }
+    const existing = await this.latestEventPackManifest(namespace);
+    const afterCursor = existing?.through_cursor || null;
+    const individual = await this.cloudEventsAfter(namespace, afterCursor);
+    const hotWindow = Math.max(0, Math.min(Number(process.env.ZENOS_MEMORY_EVENT_PACK_HOT_WINDOW || 20), 500));
+    const stable = hotWindow ? individual.slice(0, Math.max(0, individual.length - hotWindow)) : individual;
+    if (!stable.length) {
+      return {
+        manifest: existing,
+        pack_count: existing?.packs.length || 0,
+        event_count: existing?.event_count || 0,
+        parity_verified: true,
+        mode,
+      };
+    }
+    const chunkSize = Math.max(25, Math.min(Number(process.env.ZENOS_MEMORY_EVENT_PACK_EVENTS || 250), 1_000));
+    const { packsRoot, manifestsRoot } = await this.cloudPackFolders(namespace);
+    const descriptors: EventPackDescriptor[] = [...(existing?.packs || [])];
+    for (let offset = 0; offset < stable.length; offset += chunkSize) {
+      const chunk = stable.slice(offset, offset + chunkSize);
+      const encoded = encodeEventPack(chunk);
+      const monthRoot = await this.ensureFolder(packsRoot, chunk[0].occurred_at.slice(0, 7));
+      const name = `${encoded.descriptor.cursor_start.slice(0, 10)}-${encoded.descriptor.pack_id}.ndjson.gz`;
+      const fileId = await this.createOrReuseBinaryFile(monthRoot, name, encoded.compressed, GZIP_MIME, {
+        format: 'zenos-memory-event-pack-v1',
+        namespace,
+        packId: encoded.descriptor.pack_id,
+        cursorStart: encoded.descriptor.cursor_start,
+        cursorEnd: encoded.descriptor.cursor_end,
+        checksum: encoded.descriptor.checksum,
+      });
+      const descriptor = EventPackDescriptorSchema.parse({ ...encoded.descriptor, file_id: fileId });
+      const verified = decodeEventPack(await this.readBinaryById(fileId), descriptor);
+      if (verified.length !== descriptor.event_count) throw new StorageError(`Event pack ${descriptor.pack_id} verification failed`);
+      descriptors.push(descriptor);
+    }
+    const manifest = buildEventPackManifest({ namespace, packs: descriptors });
+    const stamp = manifest.generated_at.replace(/[:.]/g, '-');
+    await this.createOrReuseJsonFile(manifestsRoot, `${stamp}-${manifest.manifest_id}.json`, manifest, {
+      format: manifest.format,
+      namespace,
+      manifestId: manifest.manifest_id,
+      throughCursor: manifest.through_cursor || '',
+      checksum: manifest.checksum,
+    }, false);
+    const packed = await this.eventsFromPacksAfter(namespace, afterCursor);
+    const packedIds = new Set(packed.events.map((event) => event.event_id));
+    const expectedIds = new Set(stable.map((event) => event.event_id));
+    const parityVerified = packedIds.size >= expectedIds.size
+      && [...expectedIds].every((eventId) => packedIds.has(eventId));
+    if (!parityVerified) throw new StorageError('Event pack shadow parity validation failed');
+    return {
+      manifest,
+      pack_count: manifest.packs.length,
+      event_count: manifest.event_count,
+      parity_verified: true,
+      mode,
+    };
+  }
+
   private async latestCloudSnapshot(namespace: string): Promise<CloudSnapshot | null> {
     const { snapshotsRoot } = await this.cloudNamespaceFolders(namespace);
     const files = await this.listChildren(snapshotsRoot, {
@@ -514,8 +744,35 @@ export class GoogleDriveMemoryStore {
 
   async loadCloudState(namespace: string): Promise<MaterializedCloudState> {
     const snapshot = await this.latestCloudSnapshot(namespace);
-    const events = await this.cloudEventsAfter(namespace, snapshot?.through_cursor || null);
-    return materializeCloudState({ namespace, snapshot, events });
+    const snapshotCursor = snapshot?.through_cursor || null;
+    const mode = this.eventPackMode();
+    const canaryNamespaces = new Set((process.env.ZENOS_MEMORY_EVENT_PACK_CANARY_NAMESPACES || '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean));
+    const usePacks = mode === 'read' || (mode === 'canary' && canaryNamespaces.has(namespace));
+    if (!usePacks) {
+      const events = await this.cloudEventsAfter(namespace, snapshotCursor);
+      return materializeCloudState({ namespace, snapshot, events });
+    }
+    const packed = await this.eventsFromPacksAfter(namespace, snapshotCursor);
+    const hotEvents = await this.cloudEventsAfter(namespace, packed.through_cursor || snapshotCursor);
+    const packedState = materializeCloudState({
+      namespace,
+      snapshot,
+      events: [...packed.events, ...hotEvents],
+    });
+    if (mode === 'canary') {
+      const individualState = materializeCloudState({
+        namespace,
+        snapshot,
+        events: await this.cloudEventsAfter(namespace, snapshotCursor),
+      });
+      if (packedState.revision !== individualState.revision) {
+        throw new StorageError(`Event pack canary state mismatch for namespace ${namespace}`);
+      }
+    }
+    return packedState;
   }
 
   private buildSearchIndex(state: MaterializedCloudState): Record<string, unknown> {
@@ -608,6 +865,7 @@ export class GoogleDriveMemoryStore {
   }
 
   async compactCloudNamespace(namespace: string): Promise<ReturnType<GoogleDriveMemoryStore['createCloudSnapshot']>> {
+    if (this.eventPackMode() !== 'off') await this.createEventPackShadow(namespace);
     const state = await this.loadCloudState(namespace);
     return this.createCloudSnapshot(state);
   }
@@ -791,6 +1049,71 @@ export class GoogleDriveMemoryStore {
       } satisfies DriveLease;
     });
     return leases.filter((lease): lease is DriveLease => Boolean(lease));
+  }
+
+  async driveStorageQuota(): Promise<DriveStorageQuota> {
+    try {
+      const response = await this.drive.about.get({ fields: 'storageQuota(limit,usage)' });
+      const limitBytes = response.data.storageQuota?.limit
+        ? Number(response.data.storageQuota.limit)
+        : undefined;
+      const usageBytes = response.data.storageQuota?.usage
+        ? Number(response.data.storageQuota.usage)
+        : undefined;
+      return {
+        limitBytes: Number.isFinite(limitBytes) ? limitBytes : undefined,
+        usageBytes: Number.isFinite(usageBytes) ? usageBytes : undefined,
+        freeBytes: Number.isFinite(limitBytes) && Number.isFinite(usageBytes)
+          ? Math.max(0, Number(limitBytes) - Number(usageBytes))
+          : undefined,
+      };
+    } catch (error) {
+      throw new StorageError('Failed to read Google Drive storage quota', error);
+    }
+  }
+
+  async resourceUsage(date = new Date().toISOString().slice(0, 10)): Promise<ResourceUsage> {
+    const fileId = await this.coordinationFile('_system', `resource-usage-${date}`);
+    const parsed = ResourceUsageSchema.safeParse(await this.readJsonById(fileId));
+    return parsed.success && parsed.data.date === date ? parsed.data : emptyDailyUsage(date);
+  }
+
+  async reserveResourceUsage(
+    reservation: ResourceReservation,
+    date = new Date().toISOString().slice(0, 10),
+  ): Promise<ResourceUsage> {
+    const namespace = '_system';
+    const resource = `resource-usage-${date}`;
+    const fileId = await this.coordinationFile(namespace, resource);
+    const storage = reservation.storageBytesWritten
+      ? await this.driveStorageQuota()
+      : undefined;
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const { payload, etag } = await this.readJsonWithEtag(fileId);
+      const parsed = ResourceUsageSchema.safeParse(payload);
+      const current = parsed.success && parsed.data.date === date
+        ? parsed.data
+        : emptyDailyUsage(date);
+      const next = evaluateResourceReservation({ current, reservation, storage });
+      try {
+        await this.updateJsonById(fileId, {
+          format: 'zenos-memory-resource-usage-v1',
+          ...next,
+        }, etag);
+        const confirmed = await this.readJsonById(fileId);
+        const confirmedUsage = ResourceUsageSchema.safeParse(confirmed);
+        if (confirmedUsage.success
+          && confirmedUsage.data.drive_writes === next.drive_writes
+          && confirmedUsage.data.llm_tokens === next.llm_tokens
+          && confirmedUsage.data.storage_bytes_written === next.storage_bytes_written) {
+          return confirmedUsage.data;
+        }
+      } catch (error) {
+        if (!(error instanceof ConflictError)) throw error;
+      }
+      await sleep(30 + Math.floor(Math.random() * 70));
+    }
+    throw new ConflictError('Unable to reserve Memory resource usage after concurrent updates');
   }
 
   async listCloudAudit(namespace: string, limit = 100): Promise<Array<Record<string, unknown>>> {

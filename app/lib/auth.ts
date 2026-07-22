@@ -4,7 +4,7 @@ import { createDriveStoreIfConfigured } from './drive';
 export type AuthScope = 'memory:read' | 'memory:write' | 'memory:admin';
 
 interface TokenClaims {
-  ver: 1;
+  ver: 1 | 2;
   sub: string;
   scopes: AuthScope[];
   iat: number;
@@ -13,6 +13,7 @@ interface TokenClaims {
 }
 
 const TOKEN_PREFIX = 'zm1';
+const ROTATING_TOKEN_PREFIX = 'zm2';
 const MAX_CLOCK_SKEW_MS = 60_000;
 const NONCE_TTL_MS = 2 * 60_000;
 const usedNonces = new Map<string, number>();
@@ -68,9 +69,60 @@ function pathWithQuery(request: Request): string {
   return `${url.pathname}${url.search}`;
 }
 
+export type MemorySigningKeyring = {
+  activeKid: string;
+  keys: Map<string, string>;
+  explicit: boolean;
+};
+
+function parseSigningKeys(raw: string): Map<string, string> {
+  const keys = new Map<string, string>();
+  if (!raw.trim()) return keys;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    for (const [kid, value] of Object.entries(parsed)) {
+      if (/^[a-zA-Z0-9._:-]{1,64}$/.test(kid) && typeof value === 'string' && value.length >= 32) keys.set(kid, value);
+    }
+    return keys;
+  } catch {
+    for (const entry of raw.split(',')) {
+      const separator = entry.indexOf(':');
+      if (separator <= 0) continue;
+      const kid = entry.slice(0, separator).trim();
+      const secret = entry.slice(separator + 1).trim();
+      if (/^[a-zA-Z0-9._:-]{1,64}$/.test(kid) && secret.length >= 32) keys.set(kid, secret);
+    }
+    return keys;
+  }
+}
+
+export function memorySigningKeyring(): MemorySigningKeyring | null {
+  const explicitKeys = parseSigningKeys(process.env.ZENOS_MEMORY_SIGNING_KEYS || '');
+  if (explicitKeys.size) {
+    const requested = (process.env.ZENOS_MEMORY_ACTIVE_KID || '').trim();
+    const activeKid = requested && explicitKeys.has(requested) ? requested : [...explicitKeys.keys()][0];
+    return { activeKid, keys: explicitKeys, explicit: true };
+  }
+  const legacy = process.env.ZENOS_MEMORY_SECRET?.trim() || process.env.ETLA_MASTER_SECRET?.trim();
+  if (!legacy) return null;
+  return { activeKid: 'legacy', keys: new Map([['legacy', legacy]]), explicit: false };
+}
+
 function canonicalV2(request: Request, timestamp: number, nonce: string, bodyHash: string): string {
   return [
     'zenos-memory-signature-v2',
+    String(timestamp),
+    nonce,
+    request.method.toUpperCase(),
+    pathWithQuery(request),
+    bodyHash,
+  ].join('\n');
+}
+
+function canonicalV3(request: Request, timestamp: number, nonce: string, bodyHash: string, kid: string): string {
+  return [
+    'zenos-memory-signature-v3',
+    kid,
     String(timestamp),
     nonce,
     request.method.toUpperCase(),
@@ -119,6 +171,48 @@ function verifySignatureV2(
   return false;
 }
 
+function verifySignatureV3(
+  request: Request,
+  keyring: MemorySigningKeyring,
+  consumeNonce = true,
+  onFailure?: (reason: SignatureFailureReason) => void,
+): boolean {
+  const kid = request.headers.get('x-etla-kid')?.trim() || '';
+  const secret = keyring.keys.get(kid);
+  if (!secret) {
+    onFailure?.('signature_mismatch');
+    return false;
+  }
+  const tsRaw = request.headers.get('x-etla-timestamp') || '';
+  const nonce = request.headers.get('x-etla-nonce') || '';
+  const signature = request.headers.get('x-etla-signature') || '';
+  const bodyHash = request.headers.get('x-etla-content-sha256') || sha256('');
+  const timestamp = Number(tsRaw);
+  const now = Date.now();
+  if (!Number.isSafeInteger(timestamp) || Math.abs(now - timestamp) > MAX_CLOCK_SKEW_MS) {
+    onFailure?.('timestamp');
+    return false;
+  }
+  if (!/^[a-f0-9]{64}$/i.test(bodyHash)) {
+    onFailure?.('body_hash');
+    return false;
+  }
+  if (!/^[a-zA-Z0-9_-]{16,128}$/.test(nonce)) {
+    onFailure?.('nonce_format');
+    return false;
+  }
+  const expected = createHmac('sha256', secret)
+    .update(canonicalV3(request, timestamp, nonce, bodyHash, kid), 'utf8')
+    .digest('hex');
+  if (!safeEqualHex(signature, expected)) {
+    onFailure?.('signature_mismatch');
+    return false;
+  }
+  if (!consumeNonce || claimNonce(nonce, now)) return true;
+  onFailure?.('nonce_replay_or_capacity');
+  return false;
+}
+
 function verifyLegacySignature(request: Request, secret: string): boolean {
   if (process.env.ZENOS_MEMORY_ALLOW_LEGACY_HMAC !== 'true') return false;
   const tsRaw = request.headers.get('x-etla-timestamp') || '';
@@ -149,7 +243,7 @@ function tokenFromRequest(request: Request): string {
   const explicit = request.headers.get('x-etla-token')?.trim();
   if (explicit) return explicit;
   const authorization = request.headers.get('authorization')?.trim() || '';
-  if (/^Bearer\s+zm1\./i.test(authorization)) return authorization.replace(/^Bearer\s+/i, '');
+  if (/^Bearer\s+zm[12]\./i.test(authorization)) return authorization.replace(/^Bearer\s+/i, '');
   return '';
 }
 
@@ -176,6 +270,32 @@ export function issueEtlaToken(
   return `${TOKEN_PREFIX}.${encoded}.${signature}`;
 }
 
+export function issueEtlaTokenFromKeyring(
+  keyring: MemorySigningKeyring,
+  options: {
+    ttlMs?: number;
+    subject?: string;
+    scopes?: AuthScope[];
+  } = {},
+): { token: string; kid: string } {
+  const now = Date.now();
+  const ttl = Math.max(60_000, Math.min(options.ttlMs || 15 * 60_000, 60 * 60_000));
+  const claims: TokenClaims = {
+    ver: 2,
+    sub: options.subject || 'zenos-client',
+    scopes: options.scopes || ['memory:read', 'memory:write'],
+    iat: now,
+    exp: now + ttl,
+    jti: randomUUID(),
+  };
+  const encoded = base64url(JSON.stringify(claims));
+  const secret = keyring.keys.get(keyring.activeKid);
+  if (!secret) throw new Error(`Active Memory signing key ${keyring.activeKid} is unavailable`);
+  const prefix = `${ROTATING_TOKEN_PREFIX}.${keyring.activeKid}.${encoded}`;
+  const signature = createHmac('sha256', secret).update(prefix, 'utf8').digest('hex');
+  return { token: `${prefix}.${signature}`, kid: keyring.activeKid };
+}
+
 export function verifyEtlaToken(token: string, secret: string, required: AuthScope = 'memory:read'): TokenClaims | null {
   const parts = token.split('.');
   if (parts.length !== 3 || parts[0] !== TOKEN_PREFIX) return null;
@@ -190,22 +310,56 @@ export function verifyEtlaToken(token: string, secret: string, required: AuthSco
   return claims;
 }
 
+export function verifyEtlaTokenWithKeyring(
+  token: string,
+  keyring: MemorySigningKeyring,
+  required: AuthScope = 'memory:read',
+): TokenClaims | null {
+  const parts = token.split('.');
+  if (parts.length === 3 && parts[0] === TOKEN_PREFIX) {
+    for (const secret of keyring.keys.values()) {
+      const claims = verifyEtlaToken(token, secret, required);
+      if (claims) return claims;
+    }
+    return null;
+  }
+  if (parts.length !== 4 || parts[0] !== ROTATING_TOKEN_PREFIX) return null;
+  const kid = parts[1];
+  const secret = keyring.keys.get(kid);
+  if (!secret) return null;
+  const expected = createHmac('sha256', secret).update(`${parts[0]}.${parts[1]}.${parts[2]}`, 'utf8').digest('hex');
+  if (!safeEqualHex(parts[3], expected)) return null;
+  const claims = parseBase64urlJson<TokenClaims>(parts[2]);
+  if (!claims || claims.ver !== 2 || !Array.isArray(claims.scopes)) return null;
+  const now = Date.now();
+  if (!Number.isSafeInteger(claims.iat) || !Number.isSafeInteger(claims.exp)) return null;
+  if (claims.iat > now + MAX_CLOCK_SKEW_MS || claims.exp <= now || claims.exp - claims.iat > 60 * 60_000) return null;
+  if (!scopeIncludes(claims.scopes, required)) return null;
+  return claims;
+}
+
 export function verifyEtlaSignature(request: Request, secret: string): boolean {
   return verifySignatureV2(request, secret) || verifyLegacySignature(request, secret);
 }
 
 export function validateApiKey(request: Request): boolean {
   const production = process.env.NODE_ENV === 'production';
-  const secret = process.env.ETLA_MASTER_SECRET?.trim() || process.env.ZENOS_MEMORY_SECRET?.trim();
+  const keyring = memorySigningKeyring();
   const required = requiredScope(request);
 
-  if (secret) {
+  if (keyring) {
     const token = tokenFromRequest(request);
-    if (token && verifyEtlaToken(token, secret, required)) return true;
+    if (token && verifyEtlaTokenWithKeyring(token, keyring, required)) return true;
 
     const safeDirectSignature = !production
       && (request.method === 'GET' || request.method === 'HEAD');
-    if (safeDirectSignature && verifyEtlaSignature(request, secret)) return true;
+    if (safeDirectSignature) {
+      const kid = request.headers.get('x-etla-kid')?.trim();
+      if (kid && verifySignatureV3(request, keyring)) return true;
+      for (const secret of keyring.keys.values()) {
+        if (verifyEtlaSignature(request, secret)) return true;
+      }
+    }
   }
 
   const apiKey = process.env.ZENOS_MEMORY_API_KEY?.trim();
@@ -221,12 +375,27 @@ export function validateApiKey(request: Request): boolean {
 }
 
 export async function authenticateTokenExchange(request: Request): Promise<boolean> {
-  const secret = process.env.ETLA_MASTER_SECRET?.trim() || process.env.ZENOS_MEMORY_SECRET?.trim();
-  if (!secret) return false;
-  if (verifyLegacySignature(request, secret)) return true;
+  const keyring = memorySigningKeyring();
+  if (!keyring) return false;
+  const kid = request.headers.get('x-etla-kid')?.trim();
   let failureReason: SignatureFailureReason | undefined;
-  if (!verifySignatureV2(request, secret, false, (reason) => { failureReason = reason; })) {
-    console.warn('[ZenosMemory] Token exchange rejected', { reason: failureReason || 'unknown' });
+  let verified = false;
+  if (kid) {
+    verified = verifySignatureV3(request, keyring, false, (reason) => { failureReason = reason; });
+  } else {
+    for (const secret of keyring.keys.values()) {
+      if (verifyLegacySignature(request, secret)
+        || verifySignatureV2(request, secret, false, (reason) => { failureReason = reason; })) {
+        verified = true;
+        break;
+      }
+    }
+  }
+  if (!verified) {
+    console.warn('[ZenosMemory] Token exchange rejected', {
+      reason: failureReason || 'unknown',
+      kid: kid || 'legacy',
+    });
     return false;
   }
 

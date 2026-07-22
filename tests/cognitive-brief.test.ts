@@ -104,6 +104,42 @@ test('cognitive brief compiles decision-grade context instead of dumping generic
   }
 });
 
+test('cognitive brief surfaces conflicting cards instead of silently selecting one claim', async () => {
+  const context = fixture();
+  try {
+    const first = await context.engine.remember({
+      namespace: 'project',
+      type: 'decision',
+      content: 'Decision: the production checkpoint authority is the Hermes plugin.',
+      metadata: { importance: 9, confidence: 0.9, tags: ['authoritative', 'legacy-decision'] },
+    });
+    await context.engine.remember({
+      namespace: 'project',
+      type: 'decision',
+      content: 'Decision: Runtime is the only production checkpoint authority.',
+      metadata: {
+        importance: 10,
+        confidence: 0.99,
+        tags: ['authoritative', 'current-decision', 'conflict'],
+        contradictions: [first.id],
+      },
+    });
+    const brief = await buildCognitiveBrief({
+      objective: 'Verify the production checkpoint authority before changing compaction',
+      phase: 'plan',
+      namespace: 'project',
+      max_chars: 8_000,
+      limit: 20,
+    }, context.engine);
+    assert.match(brief.content, /Contradictions requiring verification/);
+    assert.match(brief.content, /Hermes plugin/);
+    assert.match(brief.content, /Runtime is the only/);
+    assert.match(brief.unknowns.join(' '), /Do not choose one silently/i);
+  } finally {
+    context.close();
+  }
+});
+
 test('procedural memory remains a candidate until the same validated pattern succeeds three times', async () => {
   const context = fixture();
   const signature = 'a'.repeat(64);

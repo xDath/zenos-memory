@@ -49,6 +49,7 @@ export type CognitiveBrief = {
     user_preferences: BriefItem[];
     active_tasks: BriefItem[];
     artifacts: BriefItem[];
+    contradictions: BriefItem[];
     supporting_evidence: BriefItem[];
   };
   unknowns: string[];
@@ -120,6 +121,8 @@ function categoryScore(memory: ScoredMemory, category: keyof CognitiveBrief['sec
       return base + (memory.type === 'task' ? 5 : 0) + (/\b(?:pending|blocker|todo|next|active task|lanjut)\b/i.test(text) ? 3 : 0);
     case 'artifacts':
       return base + (memory.type === 'file' ? 5 : 0) + (ARTIFACT_PATTERN.test(text) ? 3 : 0);
+    case 'contradictions':
+      return base + ((memory.metadata.contradictions || []).length ? 8 : 0) + (/\b(?:contradiction|conflict|supersede|disagree|bertentangan|konflik)\b/i.test(text) ? 4 : 0);
     case 'supporting_evidence':
     default:
       return base;
@@ -162,6 +165,10 @@ function selectCategory(
           return ['project', 'fact', 'event', 'insight'].includes(memory.type)
             && importance >= 5
             && (CURRENT_PATTERN.test(text) || relevance >= 0.12);
+        }
+        if (category === 'contradictions') {
+          return (memory.metadata.contradictions || []).length > 0
+            || /\b(?:contradiction|conflict|disagree|bertentangan|konflik)\b/i.test(text);
         }
         if (category === 'supporting_evidence') return importance >= 5 && relevance >= 0.08;
         return true;
@@ -208,6 +215,7 @@ function boundedRender(brief: Omit<CognitiveBrief, 'content'>, maxChars: number)
     ['Relevant promoted procedures', brief.sections.relevant_procedures],
     ['Artifacts and evidence handles', brief.sections.artifacts],
     ['User preferences', brief.sections.user_preferences],
+    ['Contradictions requiring verification', brief.sections.contradictions],
     ['Supporting evidence', brief.sections.supporting_evidence],
   ];
   const output: string[] = [header];
@@ -274,7 +282,15 @@ async function recallNamespaces(
     include_low_quality: false,
     include_archived: false,
   })));
-  const memories = [...new Map(results.flat().map(memory => [memory.id, memory as ScoredMemory])).values()]
+  const recalled = results.flat().map(memory => memory as ScoredMemory);
+  const contradictionIds = new Set(recalled.flatMap(memory => memory.metadata.contradictions || []));
+  const contradictionTargets = contradictionIds.size
+    ? (await Promise.all(namespaces.map(namespace => engine.list(namespace, 500))))
+        .flat()
+        .filter(memory => contradictionIds.has(memory.id))
+        .map(memory => ({ ...memory, score: 100, reason: 'explicit-contradiction-target' } as ScoredMemory))
+    : [];
+  const memories = [...new Map([...recalled, ...contradictionTargets].map(memory => [memory.id, memory])).values()]
     .sort((left, right) => Number(right.score || 0) - Number(left.score || 0));
   return { namespaces, memories };
 }
@@ -293,6 +309,7 @@ export async function buildCognitiveBrief(
     user_preferences: selectCategory(memories, 'user_preferences', 4),
     active_tasks: selectCategory(memories, 'active_tasks', 5),
     artifacts: selectCategory(memories, 'artifacts', 6),
+    contradictions: selectCategory(memories, 'contradictions', 8),
     supporting_evidence: selectCategory(memories, 'supporting_evidence', 6),
   };
   const selectedIds = new Set(Object.values(sections).flat().map(entry => entry.id));
@@ -303,6 +320,9 @@ export async function buildCognitiveBrief(
   }
   if (request.latest_error && !sections.known_failures.length) {
     unknowns.push('No prior failure pattern matched the latest error strongly enough.');
+  }
+  if (sections.contradictions.length) {
+    unknowns.push('Conflicting Memory records were retrieved. Do not choose one silently; verify recency, provenance, supersession, and current tool evidence.');
   }
   const withoutContent = {
     version: 'zenos-cognitive-brief-v1' as const,

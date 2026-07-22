@@ -56,6 +56,12 @@ export class NotFoundError extends AppError {
   }
 }
 
+export class QuotaError extends AppError {
+  constructor(message: string, details?: Record<string, unknown>) {
+    super(message, { code: 'RESOURCE_QUOTA_EXCEEDED', status: 429, expose: true, details });
+  }
+}
+
 export class StorageError extends AppError {
   constructor(message: string, cause?: unknown) {
     super(message, { code: 'STORAGE_ERROR', status: 503, expose: false, cause });

@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { createDriveStoreIfConfigured } from './drive';
+import { shouldUseLlmWithinPolicy } from './resource-policy';
 import { redactSensitiveText } from './secrets';
 
 const ExtractionSchema = z.object({
@@ -98,8 +100,25 @@ function parseJsonObject(text: string): unknown | null {
   }
 }
 
+let quotaStore: ReturnType<typeof createDriveStoreIfConfigured> | undefined;
+
+async function reserveLlmBudget(
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+  maxTokens: number,
+): Promise<void> {
+  if (!shouldUseLlmWithinPolicy()) throw new Error('Memory resource policy requires deterministic degradation');
+  if (quotaStore === undefined) quotaStore = createDriveStoreIfConfigured();
+  if (!quotaStore) return;
+  const estimatedInput = Math.ceil(messages.reduce((sum, message) => sum + message.content.length, 0) / 4);
+  await quotaStore.reserveResourceUsage({
+    driveWrites: 1,
+    llmTokens: estimatedInput + Math.max(1, maxTokens),
+    storageBytesWritten: 512,
+  });
+}
+
 export function hasMemoryLLM(): boolean {
-  return Boolean(
+  return shouldUseLlmWithinPolicy() && Boolean(
     process.env.MEMORY_LLM_BASE_URL
     && process.env.MEMORY_LLM_API_KEY
     && process.env.MEMORY_LLM_MODEL,
@@ -120,6 +139,7 @@ async function callModel<T>(
   const started = Date.now();
   const boundedTimeoutMs = Math.max(3_000, Math.min(timeoutMs, 50_000));
   try {
+    await reserveLlmBudget(messages, maxTokens);
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {

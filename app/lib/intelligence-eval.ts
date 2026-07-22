@@ -241,6 +241,48 @@ export function runIntelligenceAmplificationEval() {
     { query: 'kapan batch memory otomatis di-flush?', relevant: ['ffffffff-ffff-4fff-8fff-ffffffffffff'] },
   ]);
 
+  const goldenCorpus = Array.from({ length: 100 }, (_, index) => {
+    const ordinal = index + 1;
+    const token = `golden-project-${ordinal.toString().padStart(3, '0')}`;
+    const typeCycle: Memory['type'][] = ['decision', 'procedure', 'insight', 'preference', 'project'];
+    return fixtureMemory(
+      `10000000-0000-4000-8000-${ordinal.toString(16).padStart(12, '0')}`,
+      `${token} verified card: task class ${typeCycle[index % typeCycle.length]} uses artifact app/golden/${ordinal}.ts, decision key-${ordinal}, and validated action action-${ordinal}.`,
+      {
+        type: typeCycle[index % typeCycle.length],
+        importance: 8 + (index % 3),
+        tags: ['golden-100', token, `action-${ordinal}`],
+        entities: [token, `key-${ordinal}`],
+        createdAt: `2026-07-${String(1 + (index % 20)).padStart(2, '0')}T00:00:00.000Z`,
+      },
+    );
+  });
+  const goldenNoise = Array.from({ length: 40 }, (_, index) => fixtureMemory(
+    `20000000-0000-4000-8000-${(index + 1).toString(16).padStart(12, '0')}`,
+    `Generic unrelated note ${index + 1} about visual design, weather, music, and random conversation noise.`,
+    { importance: 2, tags: ['golden-noise'] },
+  ));
+  const goldenQueries = goldenCorpus.map((memory, index) => ({
+    query: `What verified action and artifact belong to golden-project-${String(index + 1).padStart(3, '0')} key-${index + 1}?`,
+    relevant: [memory.id],
+  }));
+  const goldenMetrics = retrievalMetrics([...goldenCorpus, ...goldenNoise], goldenQueries);
+  const goldenReplay = retrievalMetrics([...goldenCorpus, ...goldenNoise], goldenQueries);
+  const counterfactualWithoutMemory = goldenQueries.map((query) => ({
+    query: query.query,
+    evidence_available: false,
+    supported_answer_possible: false,
+  }));
+  const counterfactualWithMemory = goldenMetrics.results.map((result) => ({
+    query: result.query,
+    evidence_available: result.first_relevant_rank > 0,
+    supported_answer_possible: result.first_relevant_rank > 0 && result.first_relevant_rank <= 3,
+  }));
+  const counterfactualUplift = (
+    counterfactualWithMemory.filter((item) => item.supported_answer_possible).length
+    - counterfactualWithoutMemory.filter((item) => item.supported_answer_possible).length
+  ) / goldenQueries.length;
+
   const relevantSimilarity = cosineSimilarity(
     deterministicEmbedding('current durable primary storage architecture'),
     deterministicEmbedding(currentState.content),
@@ -292,6 +334,26 @@ export function runIntelligenceAmplificationEval() {
         && personalMetrics.ndcg_at_3 >= 0.85,
       details: personalMetrics,
     },
+    {
+      name: 'golden_100_retrieval_replay_and_counterfactual',
+      passed: goldenMetrics.results.length === 100
+        && goldenMetrics.recall_at_1 >= 0.95
+        && goldenMetrics.recall_at_3 === 1
+        && goldenMetrics.mrr >= 0.97
+        && goldenMetrics.ndcg_at_3 >= 0.97
+        && JSON.stringify(goldenMetrics.results) === JSON.stringify(goldenReplay.results)
+        && counterfactualUplift === 1,
+      details: {
+        dataset_size: goldenMetrics.results.length,
+        recall_at_1: goldenMetrics.recall_at_1,
+        recall_at_3: goldenMetrics.recall_at_3,
+        mrr: goldenMetrics.mrr,
+        ndcg_at_3: goldenMetrics.ndcg_at_3,
+        deterministic_replay: JSON.stringify(goldenMetrics.results) === JSON.stringify(goldenReplay.results),
+        counterfactual_supported_answer_uplift: counterfactualUplift,
+        noisy_documents: goldenNoise.length,
+      },
+    },
   ];
 
   const passed = cases.filter(item => item.passed).length;
@@ -303,8 +365,8 @@ export function runIntelligenceAmplificationEval() {
     failed: cases.length - passed,
     cases,
     methodology: {
-      scope: 'deterministic contract plus twelve-query bilingual personal-use retrieval regression',
-      claims: 'This validates compaction, lifecycle, safety, and retrieval invariants on a bounded noisy corpus; longitudinal and public long-memory benchmarks remain separately required.',
+      scope: 'deterministic contract, twelve-query bilingual regression, and a 100-case noisy golden retrieval/replay/counterfactual suite',
+      claims: 'This validates compaction, lifecycle, safety, deterministic replay, and evidence availability uplift on a bounded internal corpus; real longitudinal user acceptance remains a separate promotion gate.',
       retrieval_provider: 'provider dense embeddings plus BM25-style sparse, graph, RRF, and lifecycle ranking with deterministic fallback',
     },
   };

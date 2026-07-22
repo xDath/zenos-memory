@@ -177,6 +177,62 @@ class ZenosMemoryPluginTests(unittest.TestCase):
         self.assertIn("Zenos pressure generation 2", next_checkpoint)
         self.assertEqual(provider._compact_generation, 2)
 
+    def test_runtime_coordinator_is_the_only_cloud_checkpoint_writer(self):
+        provider = self.provider()
+        provider._runtime_coordinator_enabled = True
+        calls = []
+        provider._runtime_checkpoint = lambda messages, **kwargs: calls.append({
+            "messages": messages,
+            **kwargs,
+        }) or {
+            "action": "checkpoint",
+            "context": "Runtime verified continuity checkpoint",
+            "checkpointId": "checkpoint-runtime-owned",
+        }
+        provider._queue_cloud_compact = lambda *args, **kwargs: self.fail(
+            "plugin must not write a second cloud compact while Runtime owns coordination"
+        )
+        messages = [
+            {"role": "user", "content": "Goal: preserve the root task."},
+            *[
+                {"role": "assistant", "content": f"routine middle message {index}"}
+                for index in range(120)
+            ],
+            {"role": "assistant", "content": "Decision: Runtime is the only checkpoint authority."},
+            {"role": "tool", "name": "test", "content": "Validation passed for app/lib/continuity-service.ts."},
+            {"role": "user", "content": "Pending next action: continue automatically."},
+        ]
+        checkpoint = provider.on_pre_compress(messages)
+        self.assertEqual(checkpoint, "Runtime verified continuity checkpoint")
+        self.assertEqual(len(calls), 1)
+        rendered = json.dumps(calls[0]["messages"], ensure_ascii=False)
+        self.assertIn("preserve the root task", rendered)
+        self.assertIn("only checkpoint authority", rendered)
+        self.assertIn("continuity-service.ts", rendered)
+        self.assertIn("continue automatically", rendered)
+
+    def test_evidence_bounding_never_drops_meaningful_head_or_middle_after_eighty_messages(self):
+        messages = [
+            {"role": "user", "content": "Goal: keep this original acceptance criterion."},
+            *[
+                {"role": "assistant", "content": f"routine message {index}"}
+                for index in range(100)
+            ],
+            {"role": "assistant", "content": "Decision: preserve the architecture choice from the middle."},
+            *[
+                {"role": "assistant", "content": f"tail filler {index}"}
+                for index in range(100)
+            ],
+            {"role": "tool", "name": "test", "content": "Validation passed for app/lib/command-job.ts."},
+            {"role": "user", "content": "Pending next action: resume validation."},
+        ]
+        bounded = PLUGIN._bounded_compact_messages(messages, max_messages=300, max_chars=240_000)
+        rendered = json.dumps(bounded, ensure_ascii=False)
+        self.assertIn("original acceptance criterion", rendered)
+        self.assertIn("architecture choice from the middle", rendered)
+        self.assertIn("command-job.ts", rendered)
+        self.assertIn("resume validation", rendered)
+
     def test_compact_spool_survives_process_loss_before_cloud_flush(self):
         provider = self.provider()
         provider._start_cloud_compact_job = lambda job: None

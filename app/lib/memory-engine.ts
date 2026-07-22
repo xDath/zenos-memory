@@ -27,6 +27,7 @@ import {
 import { buildMutationPlan } from './memory-mutation';
 import { buildMaintenanceReport } from './memory-maintainer';
 import { EmbeddingResult, getEmbedding, getEmbeddings } from './neural-embedding';
+import { memoryOperationMode, resourceLimits } from './resource-policy';
 import {
   InternalRecallRequestSchema,
   Memory,
@@ -295,6 +296,13 @@ export class MemoryEngine {
       // lost or the lease silently expired during a slow embedding/LLM call.
       await assertLease();
       if (deferred?.events.length) {
+        await this.reserveCloudResources({
+          driveWrites: deferred.events.length + 1,
+          storageBytesWritten: deferred.events.reduce(
+            (sum, event) => sum + Buffer.byteLength(JSON.stringify(event)),
+            0,
+          ),
+        });
         await this.driveBackup.appendCloudEvents(
           deferred.events,
           Number(process.env.ZENOS_MEMORY_EVENT_UPLOAD_CONCURRENCY || 4),
@@ -323,6 +331,23 @@ export class MemoryEngine {
       releaseWriteGate();
       await this.driveBackup.releaseCloudLease(currentLease).catch(() => false);
     }
+  }
+
+  private async reserveCloudResources(input: {
+    driveWrites?: number;
+    storageBytesWritten?: number;
+    llmTokens?: number;
+  }): Promise<void> {
+    if (!this.cloudMode || !this.driveBackup) return;
+    const quotaAware = this.driveBackup as GoogleDriveMemoryStore & {
+      reserveResourceUsage?: (reservation: {
+        driveWrites?: number;
+        storageBytesWritten?: number;
+        llmTokens?: number;
+      }) => Promise<unknown>;
+    };
+    if (typeof quotaAware.reserveResourceUsage !== 'function') return;
+    await quotaAware.reserveResourceUsage(input);
   }
 
   private async persistCloudChanges(input: {
@@ -359,6 +384,10 @@ export class MemoryEngine {
     }
 
     if (active?.namespace === normalized) await active.assertLease();
+    await this.reserveCloudResources({
+      driveWrites: 2,
+      storageBytesWritten: Buffer.byteLength(JSON.stringify(event)),
+    });
     const uploaded = await this.driveBackup.appendCloudEvent(event);
     const nextState: MaterializedCloudState = {
       namespace: normalized,
@@ -1842,6 +1871,44 @@ export class MemoryEngine {
     })).digest('hex');
   }
 
+  async resourcePolicyStatus() {
+    const limits = resourceLimits();
+    const signingKids = (() => {
+      const raw = process.env.ZENOS_MEMORY_SIGNING_KEYS || '';
+      if (!raw.trim()) return process.env.ZENOS_MEMORY_SECRET || process.env.ETLA_MASTER_SECRET ? ['legacy'] : [];
+      try {
+        return Object.keys(JSON.parse(raw) as Record<string, unknown>).filter((kid) => /^[a-zA-Z0-9._:-]{1,64}$/.test(kid));
+      } catch {
+        return raw.split(',').map((entry) => entry.split(':', 1)[0].trim()).filter(Boolean);
+      }
+    })();
+    const drive = this.cloudMode && this.driveBackup
+      ? await Promise.all([
+          this.driveBackup.resourceUsage().catch(() => null),
+          this.driveBackup.driveStorageQuota().catch(() => null),
+        ])
+      : [null, null];
+    return {
+      operation_mode: memoryOperationMode(),
+      degradation_mode: limits.degradationMode,
+      event_pack_mode: (process.env.ZENOS_MEMORY_EVENT_PACK_MODE || 'shadow').trim().toLowerCase(),
+      limits: {
+        max_daily_drive_writes: limits.maxDailyDriveWrites,
+        max_daily_llm_tokens: limits.maxDailyLlmTokens,
+        max_storage_bytes: limits.maxStorageBytes,
+        min_free_storage_bytes: limits.minFreeStorageBytes,
+      },
+      usage: drive[0],
+      drive_storage: drive[1],
+      signing: {
+        active_kid: process.env.ZENOS_MEMORY_ACTIVE_KID || (signingKids.includes('legacy') ? 'legacy' : signingKids[0] || null),
+        accepted_kids: signingKids,
+        rotation_enabled: signingKids.length > 1,
+        runtime_secret_separated: Boolean(process.env.ZENOS_MEMORY_SIGNING_KEYS || process.env.ZENOS_MEMORY_SECRET),
+      },
+    };
+  }
+
   async readiness(namespace = process.env.ZENOS_MEMORY_DEFAULT_NAMESPACE || 'zenos') {
     const normalized = normalizeNamespace(namespace);
     // A cold instance verifies and materializes Drive synchronously once. Warm
@@ -1894,8 +1961,13 @@ export class MemoryEngine {
         required: this.cloudMode || process.env.ZENOS_MEMORY_REQUIRE_DRIVE_BACKUP === 'true',
         healthy: driveHealthy,
       },
+      policy: {
+        operation_mode: memoryOperationMode(),
+        degradation_mode: resourceLimits().degradationMode,
+        event_pack_mode: (process.env.ZENOS_MEMORY_EVENT_PACK_MODE || 'shadow').trim().toLowerCase(),
+      },
       security: {
-        fail_closed: Boolean(process.env.ETLA_MASTER_SECRET || process.env.ZENOS_MEMORY_SECRET || process.env.ZENOS_MEMORY_API_KEY),
+        fail_closed: Boolean(process.env.ZENOS_MEMORY_SIGNING_KEYS || process.env.ETLA_MASTER_SECRET || process.env.ZENOS_MEMORY_SECRET || process.env.ZENOS_MEMORY_API_KEY),
         legacy_hmac_enabled: process.env.ZENOS_MEMORY_ALLOW_LEGACY_HMAC === 'true',
         static_api_key_enabled: process.env.ZENOS_MEMORY_ALLOW_STATIC_API_KEY === 'true',
         raw_secret_storage: false,

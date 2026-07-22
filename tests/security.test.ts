@@ -8,10 +8,13 @@ import { inspect } from 'node:util';
 import {
   authenticateTokenExchange,
   issueEtlaToken,
+  issueEtlaTokenFromKeyring,
+  memorySigningKeyring,
   sha256Body,
   validateApiKey,
   verifyEtlaSignature,
   verifyEtlaToken,
+  verifyEtlaTokenWithKeyring,
 } from '../app/lib/auth';
 import { publicError, SensitiveDataError, StorageError } from '../app/lib/errors';
 import { MemoryEngine } from '../app/lib/memory-engine';
@@ -41,6 +44,89 @@ test('scoped tokens enforce read/write boundaries', () => {
   const writeToken = issueEtlaToken(secret, { scopes: ['memory:write'], subject: 'test' });
   assert.ok(verifyEtlaToken(writeToken, secret, 'memory:read'));
   assert.ok(verifyEtlaToken(writeToken, secret, 'memory:write'));
+});
+
+test('rotating Memory signing keys issue kid-bound tokens and preserve the previous key during rotation', () => {
+  const current = randomBytes(32).toString('hex');
+  const previous = randomBytes(32).toString('hex');
+  withEnvironment({
+    ZENOS_MEMORY_SIGNING_KEYS: JSON.stringify({ current, previous }),
+    ZENOS_MEMORY_ACTIVE_KID: 'current',
+    ZENOS_MEMORY_SECRET: undefined,
+    ETLA_MASTER_SECRET: undefined,
+  }, () => {
+    const keyring = memorySigningKeyring();
+    assert.ok(keyring);
+    assert.equal(keyring?.activeKid, 'current');
+    assert.equal(keyring?.explicit, true);
+    const issued = issueEtlaTokenFromKeyring(keyring!, {
+      scopes: ['memory:write'],
+      subject: 'rotation-test',
+    });
+    assert.equal(issued.kid, 'current');
+    assert.match(issued.token, /^zm2\.current\./);
+    assert.ok(verifyEtlaTokenWithKeyring(issued.token, keyring!, 'memory:read'));
+    assert.ok(verifyEtlaTokenWithKeyring(issued.token, keyring!, 'memory:write'));
+
+    const priorKeyring = {
+      activeKid: 'previous',
+      keys: new Map([['previous', previous]]),
+      explicit: true,
+    };
+    const priorToken = issueEtlaTokenFromKeyring(priorKeyring, { scopes: ['memory:read'] }).token;
+    assert.ok(verifyEtlaTokenWithKeyring(priorToken, keyring!, 'memory:read'));
+    const retired = { activeKid: 'current', keys: new Map([['current', current]]), explicit: true };
+    assert.equal(verifyEtlaTokenWithKeyring(priorToken, retired, 'memory:read'), null);
+  });
+});
+
+test('v3 HMAC binds the signing kid and rejects an unknown or substituted key id', async () => {
+  const current = randomBytes(32).toString('hex');
+  const previous = randomBytes(32).toString('hex');
+  const timestamp = Date.now();
+  const nonce = randomBytes(18).toString('base64url');
+  const bodyHash = sha256Body('');
+  const canonical = ['zenos-memory-signature-v3', 'current', timestamp, nonce, 'POST', '/api/auth', bodyHash].join('\n');
+  const signature = createHmac('sha256', current).update(canonical).digest('hex');
+  const signed = new Request('https://memory.example/api/auth', {
+    method: 'POST',
+    headers: {
+      'x-etla-kid': 'current',
+      'x-etla-timestamp': String(timestamp),
+      'x-etla-nonce': nonce,
+      'x-etla-content-sha256': bodyHash,
+      'x-etla-signature': signature,
+    },
+  });
+  const substituted = new Request('https://memory.example/api/auth', {
+    method: 'POST',
+    headers: {
+      'x-etla-kid': 'previous',
+      'x-etla-timestamp': String(timestamp),
+      'x-etla-nonce': randomBytes(18).toString('base64url'),
+      'x-etla-content-sha256': bodyHash,
+      'x-etla-signature': signature,
+    },
+  });
+  const previousEnvironment = {
+    keys: process.env.ZENOS_MEMORY_SIGNING_KEYS,
+    active: process.env.ZENOS_MEMORY_ACTIVE_KID,
+    mode: process.env.ZENOS_MEMORY_STORAGE_MODE,
+  };
+  try {
+    process.env.ZENOS_MEMORY_SIGNING_KEYS = JSON.stringify({ current, previous });
+    process.env.ZENOS_MEMORY_ACTIVE_KID = 'current';
+    delete process.env.ZENOS_MEMORY_STORAGE_MODE;
+    assert.equal(await authenticateTokenExchange(signed), true);
+    assert.equal(await authenticateTokenExchange(substituted), false);
+  } finally {
+    if (previousEnvironment.keys === undefined) delete process.env.ZENOS_MEMORY_SIGNING_KEYS;
+    else process.env.ZENOS_MEMORY_SIGNING_KEYS = previousEnvironment.keys;
+    if (previousEnvironment.active === undefined) delete process.env.ZENOS_MEMORY_ACTIVE_KID;
+    else process.env.ZENOS_MEMORY_ACTIVE_KID = previousEnvironment.active;
+    if (previousEnvironment.mode === undefined) delete process.env.ZENOS_MEMORY_STORAGE_MODE;
+    else process.env.ZENOS_MEMORY_STORAGE_MODE = previousEnvironment.mode;
+  }
 });
 
 test('v2 HMAC verifies before consuming nonce and token exchange rejects replay', async () => {

@@ -26,6 +26,7 @@ from tools.registry import tool_error
 logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://zenos-memory.vercel.app"
+DEFAULT_RUNTIME_URL = "http://127.0.0.1:3090"
 DEFAULT_NAMESPACE = "zenos"
 
 
@@ -41,7 +42,11 @@ def _load_config() -> dict:
         "base_url": DEFAULT_BASE_URL,
         "secret": "",
         "namespace": DEFAULT_NAMESPACE,
-        "auto_compact_max_messages": 80,
+        "auto_compact_max_messages": 300,
+        "runtime_coordinator_enabled": True,
+        "runtime_url": DEFAULT_RUNTIME_URL,
+        "runtime_checkpoint_timeout_seconds": 25,
+        "runtime_checkpoint_soft_limit_tokens": 160_000,
         "salience_batch_size": 4,
         "salience_flush_seconds": 30,
         "salience_spool_path": str(get_hermes_home() / "state" / "zenos-memory-salience-spool.json"),
@@ -57,9 +62,14 @@ def _load_config() -> dict:
 
     environment_overrides = {
         "base_url": os.environ.get("ZENOS_MEMORY_URL"),
-        "secret": os.environ.get("ETLA_MASTER_SECRET"),
+        "secret": (
+            os.environ.get("ZENOS_MEMORY_SIGNING_SECRET")
+            or os.environ.get("ZENOS_MEMORY_SECRET")
+            or os.environ.get("ETLA_MASTER_SECRET")
+        ),
         "namespace": os.environ.get("ZENOS_MEMORY_NAMESPACE"),
         "auto_compact_max_messages": os.environ.get("ZENOS_MEMORY_AUTO_COMPACT_MAX_MESSAGES"),
+        "runtime_url": os.environ.get("ZENOS_RUNTIME_URL"),
         "salience_batch_size": os.environ.get("ZENOS_MEMORY_SALIENCE_BATCH_SIZE"),
         "salience_flush_seconds": os.environ.get("ZENOS_MEMORY_SALIENCE_FLUSH_SECONDS"),
         "salience_spool_path": os.environ.get("ZENOS_MEMORY_SALIENCE_SPOOL_PATH"),
@@ -67,6 +77,32 @@ def _load_config() -> dict:
     }
     cfg.update({key: value for key, value in environment_overrides.items() if value not in (None, "")})
     return cfg
+
+
+def _runtime_api_key() -> str:
+    direct = os.environ.get("ZENOS_RUNTIME_API_KEY", "").strip()
+    if direct:
+        return direct
+    credential_directory = os.environ.get("CREDENTIALS_DIRECTORY", "").strip()
+    candidates = [
+        os.environ.get("ZENOS_RUNTIME_ENV_FILE", ""),
+        str(Path(credential_directory) / "zenos-runtime.env") if credential_directory else "",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            for raw_line in Path(candidate).read_text(encoding="utf-8").splitlines():
+                if not raw_line.startswith("ZENOS_RUNTIME_API_KEY="):
+                    continue
+                value = raw_line.split("=", 1)[1].strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                    value = value[1:-1]
+                if value:
+                    return value
+        except OSError:
+            continue
+    return ""
 
 
 def _stable_message_content(content: Any) -> str:
@@ -86,8 +122,13 @@ def _stable_message_content(content: Any) -> str:
     return str(content)
 
 
-def _continuity_fingerprint(messages: list[dict], limit: int = 80) -> str:
-    bounded = messages[-max(1, min(limit, 80)):]
+def _continuity_fingerprint(messages: list[dict], limit: int = 400) -> str:
+    bounded = _bounded_compact_messages(
+        messages,
+        max_messages=max(20, min(limit, 400)),
+        max_chars=500_000,
+        max_message_chars=32_000,
+    )
     rendered = "\n---\n".join(
         f"{str(message.get('role') or '').strip().lower()}\n{_stable_message_content(message.get('content'))}"
         for message in bounded
@@ -98,39 +139,80 @@ def _continuity_fingerprint(messages: list[dict], limit: int = 80) -> str:
 def _bounded_compact_messages(
     messages: list[dict],
     *,
-    max_messages: int = 80,
-    max_chars: int = 115_000,
-    max_message_chars: int = 12_000,
+    max_messages: int = 300,
+    max_chars: int = 240_000,
+    max_message_chars: int = 32_000,
 ) -> list[dict]:
-    """Build a provider-safe compact source without exceeding API hard limits."""
-    selected: list[dict] = []
-    used = 0
-    for message in reversed(messages[-max(1, min(max_messages, 80)):]):
+    """Compile head, milestones, tool evidence, and tail under section budgets."""
+    normalized: list[tuple[int, dict, str]] = []
+    for index, message in enumerate(messages[-400:]):
         role = str(message.get("role") or "unknown").strip().lower()[:80]
-        content = _stable_message_content(message.get("content"))[:max_message_chars]
+        content = _stable_message_content(message.get("content")).strip()[:max_message_chars]
         if not content:
             continue
-        cost = len(content)
-        if selected and used + cost > max_chars:
-            continue
-        if not selected and cost > max_chars:
-            content = content[:max_chars]
-            cost = len(content)
-        selected.append({
+        normalized.append((index, {
             "role": role,
             "content": content,
             **({"name": str(message.get("name"))[:200]} if message.get("name") else {}),
             **({"tool_call_id": str(message.get("tool_call_id"))[:500]} if message.get("tool_call_id") else {}),
-        })
-        used += cost
-        if used >= max_chars:
-            break
-    return list(reversed(selected))
+            **({"message_id": str(message.get("message_id") or message.get("id"))[:500]}
+               if message.get("message_id") or message.get("id") else {}),
+        }, content))
+    if not normalized:
+        return []
+
+    meaningful = re.compile(
+        r"\b(?:goal|objective|tujuan|buat|bikin|implement|upgrade|audit|fix|perbaiki|decision|decided|keputusan|diputuskan|constraint|must|jangan|harus|wajib|acceptance criteria)\b",
+        re.I,
+    )
+    milestone = re.compile(
+        r"\b(?:decision|decided|constraint|patch|edit|changed|modified|test|typecheck|lint|build|validation|passed|failed|blocker|error|pending|next|lanjut|belum)\b",
+        re.I,
+    )
+    head_indexes = [index for index, item, text in normalized[:40]
+                    if item["role"] in {"system", "user"} and meaningful.search(text)][:8]
+    if not head_indexes:
+        head_indexes = [index for index, item, _ in normalized[:12] if item["role"] in {"system", "user"}][:8]
+    milestone_indexes = [index for index, item, text in normalized
+                         if item["role"] == "tool" or milestone.search(text)]
+    tail_count = max(20, min(160, max_messages - len(head_indexes)))
+    tail_indexes = [index for index, _, _ in normalized[-tail_count:]]
+
+    head_budget = int(max_chars * 0.12)
+    milestone_budget = int(max_chars * 0.33)
+    tool_budget = int(max_chars * 0.20)
+    tail_budget = max_chars - head_budget - milestone_budget - tool_budget
+    groups = [
+        (head_indexes, head_budget),
+        ([index for index in milestone_indexes if normalized[index][1]["role"] != "tool"], milestone_budget),
+        ([index for index in milestone_indexes if normalized[index][1]["role"] == "tool"], tool_budget),
+        (tail_indexes, tail_budget),
+    ]
+    selected_indexes: set[int] = set()
+    for indexes, budget in groups:
+        used = 0
+        for index in indexes:
+            if index in selected_indexes or len(selected_indexes) >= max_messages:
+                continue
+            message = normalized[index][1]
+            remaining = budget - used
+            if remaining <= 64:
+                break
+            content = str(message["content"])
+            bounded = dict(message)
+            bounded["content"] = content[:max(64, min(max_message_chars, remaining - 32))]
+            cost = len(json.dumps(bounded, ensure_ascii=False, sort_keys=True))
+            if cost > remaining and used:
+                continue
+            normalized[index] = (normalized[index][0], bounded, bounded["content"])
+            selected_indexes.add(index)
+            used += min(cost, remaining)
+    return [normalized[index][1] for index in sorted(selected_indexes)][:max_messages]
 
 
 def _deterministic_continuity_checkpoint(messages: list[dict], max_chars: int = 8_000) -> str:
     """Build a bounded continuity handoff without any model dependency."""
-    bounded = messages[-80:]
+    bounded = _bounded_compact_messages(messages, max_messages=300, max_chars=120_000)
     entries: list[tuple[str, str]] = []
     for message in bounded:
         role = str(message.get("role") or "").strip().lower()
@@ -189,20 +271,30 @@ def _token_exchange_headers(secret: str, scopes: list[str], client_id: str = "he
     timestamp = int(time.time() * 1000)
     nonce = secrets.token_urlsafe(18)
     body_hash = hashlib.sha256(b"").hexdigest()
-    canonical = "\n".join([
+    kid = os.environ.get("ZENOS_MEMORY_SIGNING_KID", "").strip()
+    canonical = "\n".join(([
+        "zenos-memory-signature-v3",
+        kid,
+        str(timestamp),
+        nonce,
+        "POST",
+        "/api/auth",
+        body_hash,
+    ] if kid else [
         "zenos-memory-signature-v2",
         str(timestamp),
         nonce,
         "POST",
         "/api/auth",
         body_hash,
-    ])
+    ]))
     signature = hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
     return {
         "x-etla-timestamp": str(timestamp),
         "x-etla-nonce": nonce,
         "x-etla-content-sha256": body_hash,
         "x-etla-signature": signature,
+        **({"x-etla-kid": kid, "x-etla-signature-version": "3"} if kid else {}),
         "x-etla-client-id": client_id,
         "x-etla-requested-scopes": " ".join(scopes),
         "Content-Type": "application/json",
@@ -220,7 +312,11 @@ class ZenosMemoryProvider(MemoryProvider):
         self._secret = ""
         self._namespace = DEFAULT_NAMESPACE
         self._session_id = ""
-        self._auto_compact_max_messages = 80
+        self._auto_compact_max_messages = 300
+        self._runtime_coordinator_enabled = True
+        self._runtime_url = DEFAULT_RUNTIME_URL
+        self._runtime_checkpoint_timeout_seconds = 25
+        self._runtime_checkpoint_soft_limit_tokens = 160_000
         self._last_compact_fingerprint = ""
         self._compact_generation = 0
         self._salience_batch_size = 4
@@ -267,9 +363,20 @@ class ZenosMemoryProvider(MemoryProvider):
                 "description": "Etla master secret for HMAC signing",
                 "secret": True,
                 "required": True,
-                "env_var": "ETLA_MASTER_SECRET",
+                "env_var": "ZENOS_MEMORY_SIGNING_SECRET",
             },
             {"key": "namespace", "description": "Default namespace", "default": DEFAULT_NAMESPACE},
+            {
+                "key": "runtime_coordinator_enabled",
+                "description": "Let Zenos Runtime own compression checkpoints",
+                "default": True,
+            },
+            {"key": "runtime_url", "description": "Zenos Runtime URL", "default": DEFAULT_RUNTIME_URL},
+            {
+                "key": "runtime_checkpoint_timeout_seconds",
+                "description": "Runtime checkpoint deadline",
+                "default": 25,
+            },
         ]
 
     def initialize(self, session_id: str, **kwargs) -> None:
@@ -282,7 +389,17 @@ class ZenosMemoryProvider(MemoryProvider):
         self._session_id = str(session_id or "")
         self._auto_compact_max_messages = max(
             20,
-            min(int(self._cfg.get("auto_compact_max_messages") or 80), 160),
+            min(int(self._cfg.get("auto_compact_max_messages") or 300), 400),
+        )
+        self._runtime_coordinator_enabled = bool(self._cfg.get("runtime_coordinator_enabled", True))
+        self._runtime_url = str(self._cfg.get("runtime_url") or DEFAULT_RUNTIME_URL).rstrip("/")
+        self._runtime_checkpoint_timeout_seconds = max(
+            3,
+            min(int(self._cfg.get("runtime_checkpoint_timeout_seconds") or 25), 90),
+        )
+        self._runtime_checkpoint_soft_limit_tokens = max(
+            24_000,
+            min(int(self._cfg.get("runtime_checkpoint_soft_limit_tokens") or 160_000), 1_000_000),
         )
         self._salience_batch_size = max(2, min(int(self._cfg.get("salience_batch_size") or 4), 8))
         self._salience_flush_seconds = max(5, min(int(self._cfg.get("salience_flush_seconds") or 30), 300))
@@ -297,7 +414,8 @@ class ZenosMemoryProvider(MemoryProvider):
             self._compact_inflight.clear()
             self._compact_jobs = self._load_compact_spool()
         self._start_salience_timer()
-        self._retry_compact_spool()
+        if not self._runtime_coordinator_enabled:
+            self._retry_compact_spool()
 
     def _load_salience_spool(self) -> list[dict]:
         try:
@@ -381,7 +499,8 @@ class ZenosMemoryProvider(MemoryProvider):
     def _salience_timer_loop(self) -> None:
         while not self._salience_stop.wait(self._salience_flush_seconds):
             self._flush_salience_buffer(force=True)
-            self._retry_compact_spool()
+            if not self._runtime_coordinator_enabled:
+                self._retry_compact_spool()
 
     def _start_salience_timer(self) -> None:
         self._salience_stop = threading.Event()
@@ -461,6 +580,52 @@ class ZenosMemoryProvider(MemoryProvider):
             raise RuntimeError(f"Zenos request failed with HTTP {exc.code}") from exc
         except URLError as exc:
             raise RuntimeError("Zenos Memory is unreachable") from exc
+
+    def _runtime_checkpoint(
+        self,
+        messages: list[dict],
+        *,
+        fingerprint: str,
+        approx_tokens: int,
+        generation: int,
+    ) -> dict:
+        api_key = _runtime_api_key()
+        if not api_key:
+            raise RuntimeError("ZENOS_RUNTIME_API_KEY is not configured for the checkpoint coordinator")
+        body = {
+            "sessionId": self._session_id or "hermes-memory-session",
+            "turnId": f"compression-{generation}-{fingerprint[:16]}",
+            "namespace": self._namespace,
+            "estimatedTokens": max(0, int(approx_tokens)),
+            "checkpointSoftLimitTokens": self._runtime_checkpoint_soft_limit_tokens,
+            "messages": messages,
+            "maxChars": 8_000,
+            "inputMaxChars": 240_000,
+            "forceCheckpoint": True,
+            "reason": f"hermes-pre-compress-generation:{generation}",
+        }
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        req = urllib_request.Request(
+            self._runtime_url + "/api/runtime/continuity/checkpoint",
+            data=data,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(req, timeout=self._runtime_checkpoint_timeout_seconds) as response:
+                payload = json.loads(response.read().decode("utf-8") or "{}")
+        except HTTPError as exc:
+            raise RuntimeError(f"Zenos Runtime checkpoint failed with HTTP {exc.code}") from exc
+        except (URLError, TimeoutError) as exc:
+            raise RuntimeError("Zenos Runtime checkpoint coordinator is unreachable") from exc
+        checkpoint = payload.get("checkpoint") if isinstance(payload, dict) else None
+        if not isinstance(checkpoint, dict):
+            raise RuntimeError("Zenos Runtime returned no checkpoint contract")
+        return checkpoint
 
     def _remember(
         self,
@@ -882,24 +1047,24 @@ class ZenosMemoryProvider(MemoryProvider):
         self._start_cloud_compact_job(job)
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
-        """Return local active-state continuity immediately and sync cloud later.
+        """Ask Runtime for the one authoritative checkpoint at compression.
 
-        The old implementation blocked Hermes on token exchange, Vercel, and
-        Google Drive during every compression boundary. A slow or unavailable
-        cloud service therefore made the model appear frozen and could trigger
-        repeated fallback compactions. Active working state is now local-first:
-        Hermes receives a deterministic checkpoint synchronously, while a rich
-        DAG compact is persisted asynchronously for future recall.
+        Runtime owns cursor cooldown, Memory persistence, evidence validation,
+        and checkpoint chaining. The provider never writes a second cloud
+        compact while that coordinator is enabled. If Runtime is unavailable,
+        Hermes still receives a deterministic evidence-ranked recovery brief so
+        compression cannot become a terminal failure.
         """
         if not messages:
             return ""
         bounded = _bounded_compact_messages(
             messages,
             max_messages=self._auto_compact_max_messages,
+            max_chars=240_000,
         )
         if not bounded:
             return ""
-        fingerprint = _continuity_fingerprint(bounded)
+        fingerprint = _continuity_fingerprint(bounded, limit=self._auto_compact_max_messages)
         if fingerprint == self._last_compact_fingerprint:
             return ""
         self._compact_generation += 1
@@ -910,22 +1075,45 @@ class ZenosMemoryProvider(MemoryProvider):
             f"[Zenos pressure generation {generation}; fingerprint={fingerprint[:16]}]\n\n"
             + _deterministic_continuity_checkpoint(bounded, max_chars=7_800)
         )[:8_000]
-        self._last_compact_fingerprint = fingerprint
 
-        # Neither salient-memory flushing nor cloud compaction may consume the
-        # compression critical path. Both are best-effort background durability.
         if self._secret:
             self._start_background_job(
                 lambda: self._flush_salience_buffer(force=True),
                 name="zenos-memory-precompress-salience",
             )
+
+        if self._runtime_coordinator_enabled:
+            try:
+                checkpoint = self._runtime_checkpoint(
+                    bounded,
+                    fingerprint=fingerprint,
+                    approx_tokens=approx_tokens,
+                    generation=generation,
+                )
+                context = str(checkpoint.get("context") or "").strip()
+                if not context:
+                    raise RuntimeError("Runtime checkpoint returned no recovery context")
+                self._last_compact_fingerprint = fingerprint
+                return context[:8_000]
+            except Exception as error:
+                logger.warning(
+                    "Runtime continuity coordinator failed; using deterministic recovery brief: %s",
+                    error,
+                )
+                self._last_compact_fingerprint = fingerprint
+                return deterministic_checkpoint
+
+        # Explicit rollback mode only. Legacy direct Memory persistence remains
+        # available for emergency rollback, but is never active alongside the
+        # Runtime coordinator.
+        if self._secret:
             self._queue_cloud_compact(
                 bounded,
                 fingerprint=fingerprint,
                 approx_tokens=approx_tokens,
                 generation=generation,
             )
-
+        self._last_compact_fingerprint = fingerprint
         return deterministic_checkpoint
 
 
