@@ -298,6 +298,13 @@ test.beforeEach(() => {
   directory = mkdtempSync(path.join(os.tmpdir(), 'zenos-route-contract-'));
   Reflect.set(process.env, 'NODE_ENV', 'development');
   process.env.ETLA_MASTER_SECRET = secret;
+  // Vercel injects the production rotation keyring during builds. Route
+  // contract tests intentionally use their own legacy fixture secret and must
+  // not inherit a real production auth identity.
+  delete process.env.ZENOS_MEMORY_SIGNING_KEYS;
+  delete process.env.ZENOS_MEMORY_ACTIVE_KID;
+  delete process.env.ZENOS_MEMORY_SIGNING_SECRET;
+  delete process.env.ZENOS_MEMORY_SECRET;
   process.env.ZENOS_MEMORY_DB_PATH = path.join(directory, 'memory.sqlite');
   process.env.ZENOS_MEMORY_STORAGE_MODE = 'sqlite';
   process.env.ZENOS_MEMORY_IMPORT_LEGACY_ON_START = 'false';

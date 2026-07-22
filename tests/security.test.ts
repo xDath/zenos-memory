@@ -163,18 +163,32 @@ test('v2 HMAC verifies before consuming nonce and token exchange rejects replay'
       'x-etla-signature': createHmac('sha256', secret).update(secondCanonical).digest('hex'),
     },
   });
-  const previousSecret = process.env.ETLA_MASTER_SECRET;
-  const previousMode = process.env.ZENOS_MEMORY_STORAGE_MODE;
+  const previous = {
+    masterSecret: process.env.ETLA_MASTER_SECRET,
+    memorySecret: process.env.ZENOS_MEMORY_SECRET,
+    signingKeys: process.env.ZENOS_MEMORY_SIGNING_KEYS,
+    activeKid: process.env.ZENOS_MEMORY_ACTIVE_KID,
+    mode: process.env.ZENOS_MEMORY_STORAGE_MODE,
+  };
   try {
     process.env.ETLA_MASTER_SECRET = secret;
+    delete process.env.ZENOS_MEMORY_SECRET;
+    delete process.env.ZENOS_MEMORY_SIGNING_KEYS;
+    delete process.env.ZENOS_MEMORY_ACTIVE_KID;
     delete process.env.ZENOS_MEMORY_STORAGE_MODE;
     assert.equal(await authenticateTokenExchange(exchange), true);
     assert.equal(await authenticateTokenExchange(exchange), false);
   } finally {
-    if (previousSecret === undefined) delete process.env.ETLA_MASTER_SECRET;
-    else process.env.ETLA_MASTER_SECRET = previousSecret;
-    if (previousMode === undefined) delete process.env.ZENOS_MEMORY_STORAGE_MODE;
-    else process.env.ZENOS_MEMORY_STORAGE_MODE = previousMode;
+    for (const [key, value] of Object.entries({
+      ETLA_MASTER_SECRET: previous.masterSecret,
+      ZENOS_MEMORY_SECRET: previous.memorySecret,
+      ZENOS_MEMORY_SIGNING_KEYS: previous.signingKeys,
+      ZENOS_MEMORY_ACTIVE_KID: previous.activeKid,
+      ZENOS_MEMORY_STORAGE_MODE: previous.mode,
+    })) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });
 
@@ -195,11 +209,17 @@ test('single-replica cloud service keeps token nonce replay protection off the D
   });
   const previous = {
     secret: process.env.ETLA_MASTER_SECRET,
+    memorySecret: process.env.ZENOS_MEMORY_SECRET,
+    signingKeys: process.env.ZENOS_MEMORY_SIGNING_KEYS,
+    activeKid: process.env.ZENOS_MEMORY_ACTIVE_KID,
     mode: process.env.ZENOS_MEMORY_STORAGE_MODE,
     nonceStore: process.env.ZENOS_MEMORY_AUTH_NONCE_STORE,
   };
   try {
     process.env.ETLA_MASTER_SECRET = secret;
+    delete process.env.ZENOS_MEMORY_SECRET;
+    delete process.env.ZENOS_MEMORY_SIGNING_KEYS;
+    delete process.env.ZENOS_MEMORY_ACTIVE_KID;
     process.env.ZENOS_MEMORY_STORAGE_MODE = 'drive-events';
     process.env.ZENOS_MEMORY_AUTH_NONCE_STORE = 'process';
     assert.equal(await authenticateTokenExchange(request), true);
@@ -207,6 +227,12 @@ test('single-replica cloud service keeps token nonce replay protection off the D
   } finally {
     if (previous.secret === undefined) delete process.env.ETLA_MASTER_SECRET;
     else process.env.ETLA_MASTER_SECRET = previous.secret;
+    if (previous.memorySecret === undefined) delete process.env.ZENOS_MEMORY_SECRET;
+    else process.env.ZENOS_MEMORY_SECRET = previous.memorySecret;
+    if (previous.signingKeys === undefined) delete process.env.ZENOS_MEMORY_SIGNING_KEYS;
+    else process.env.ZENOS_MEMORY_SIGNING_KEYS = previous.signingKeys;
+    if (previous.activeKid === undefined) delete process.env.ZENOS_MEMORY_ACTIVE_KID;
+    else process.env.ZENOS_MEMORY_ACTIVE_KID = previous.activeKid;
     if (previous.mode === undefined) delete process.env.ZENOS_MEMORY_STORAGE_MODE;
     else process.env.ZENOS_MEMORY_STORAGE_MODE = previous.mode;
     if (previous.nonceStore === undefined) delete process.env.ZENOS_MEMORY_AUTH_NONCE_STORE;
