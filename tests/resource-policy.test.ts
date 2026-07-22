@@ -54,7 +54,7 @@ test('daily write, token, storage, and free-space guards fail before overcommit'
     ZENOS_MEMORY_MIN_FREE_STORAGE_BYTES: '500',
   }, () => {
     const current = {
-      ...emptyDailyUsage('2026-07-22'),
+      ...emptyDailyUsage('2026-07-22', 1_500),
       drive_writes: 4,
       llm_tokens: 90,
     };
@@ -63,12 +63,12 @@ test('daily write, token, storage, and free-space guards fail before overcommit'
     assert.throws(() => evaluateResourceReservation({
       current,
       reservation: { storageBytesWritten: 600 },
-      storage: { usageBytes: 1_500, freeBytes: 10_000 },
+      storage: { usageBytes: 99_000_000, freeBytes: 10_000 },
     }), /storage ceiling/i);
     assert.throws(() => evaluateResourceReservation({
-      current,
+      current: { ...current, storage_bytes_total: 100 },
       reservation: { storageBytesWritten: 600 },
-      storage: { usageBytes: 100, freeBytes: 1_000 },
+      storage: { usageBytes: 99_000_000, freeBytes: 1_000 },
     }), /free Google Drive storage/i);
   });
 });

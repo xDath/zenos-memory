@@ -1073,9 +1073,12 @@ export class GoogleDriveMemoryStore {
   }
 
   async resourceUsage(date = new Date().toISOString().slice(0, 10)): Promise<ResourceUsage> {
-    const fileId = await this.coordinationFile('_system', `resource-usage-${date}`);
+    const fileId = await this.coordinationFile('_system', 'resource-usage-current');
     const parsed = ResourceUsageSchema.safeParse(await this.readJsonById(fileId));
-    return parsed.success && parsed.data.date === date ? parsed.data : emptyDailyUsage(date);
+    if (!parsed.success) return emptyDailyUsage(date);
+    return parsed.data.date === date
+      ? parsed.data
+      : emptyDailyUsage(date, parsed.data.storage_bytes_total);
   }
 
   async reserveResourceUsage(
@@ -1083,7 +1086,7 @@ export class GoogleDriveMemoryStore {
     date = new Date().toISOString().slice(0, 10),
   ): Promise<ResourceUsage> {
     const namespace = '_system';
-    const resource = `resource-usage-${date}`;
+    const resource = 'resource-usage-current';
     const fileId = await this.coordinationFile(namespace, resource);
     const storage = reservation.storageBytesWritten
       ? await this.driveStorageQuota()
@@ -1093,7 +1096,7 @@ export class GoogleDriveMemoryStore {
       const parsed = ResourceUsageSchema.safeParse(payload);
       const current = parsed.success && parsed.data.date === date
         ? parsed.data
-        : emptyDailyUsage(date);
+        : emptyDailyUsage(date, parsed.success ? parsed.data.storage_bytes_total : 0);
       const next = evaluateResourceReservation({ current, reservation, storage });
       try {
         await this.updateJsonById(fileId, {
@@ -1105,7 +1108,8 @@ export class GoogleDriveMemoryStore {
         if (confirmedUsage.success
           && confirmedUsage.data.drive_writes === next.drive_writes
           && confirmedUsage.data.llm_tokens === next.llm_tokens
-          && confirmedUsage.data.storage_bytes_written === next.storage_bytes_written) {
+          && confirmedUsage.data.storage_bytes_written === next.storage_bytes_written
+          && confirmedUsage.data.storage_bytes_total === next.storage_bytes_total) {
           return confirmedUsage.data;
         }
       } catch (error) {

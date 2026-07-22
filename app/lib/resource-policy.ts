@@ -9,6 +9,7 @@ export const ResourceUsageSchema = z.object({
   drive_writes: z.number().int().nonnegative(),
   llm_tokens: z.number().int().nonnegative(),
   storage_bytes_written: z.number().int().nonnegative(),
+  storage_bytes_total: z.number().int().nonnegative().default(0),
   updated_at: z.string().datetime(),
 });
 export type ResourceUsage = z.infer<typeof ResourceUsageSchema>;
@@ -46,12 +47,16 @@ export function resourceLimits() {
   };
 }
 
-export function emptyDailyUsage(date = new Date().toISOString().slice(0, 10)): ResourceUsage {
+export function emptyDailyUsage(
+  date = new Date().toISOString().slice(0, 10),
+  storageBytesTotal = 0,
+): ResourceUsage {
   return ResourceUsageSchema.parse({
     date,
     drive_writes: 0,
     llm_tokens: 0,
     storage_bytes_written: 0,
+    storage_bytes_total: Math.max(0, Math.floor(storageBytesTotal)),
     updated_at: new Date().toISOString(),
   });
 }
@@ -80,6 +85,7 @@ export function evaluateResourceReservation(input: {
     drive_writes: input.current.drive_writes + driveWrites,
     llm_tokens: input.current.llm_tokens + llmTokens,
     storage_bytes_written: input.current.storage_bytes_written + storageBytesWritten,
+    storage_bytes_total: input.current.storage_bytes_total + storageBytesWritten,
     updated_at: new Date().toISOString(),
   });
   if (limits.maxDailyDriveWrites && next.drive_writes > limits.maxDailyDriveWrites) {
@@ -98,11 +104,10 @@ export function evaluateResourceReservation(input: {
       degradation: limits.degradationMode,
     });
   }
-  if (limits.maxStorageBytes && input.storage?.usageBytes !== undefined
-    && input.storage.usageBytes + storageBytesWritten > limits.maxStorageBytes) {
+  if (limits.maxStorageBytes && next.storage_bytes_total > limits.maxStorageBytes) {
     throw new QuotaError('Configured Memory storage ceiling would be exceeded', {
       requested: storageBytesWritten,
-      used: input.storage.usageBytes,
+      used: input.current.storage_bytes_total,
       limit: limits.maxStorageBytes,
     });
   }
