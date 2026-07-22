@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Deploy Zenos Memory to Vercel.
-# Usage: ./scripts/deploy-vercel.sh [vercel-token]
+# Usage: ./scripts/deploy-vercel.sh [vercel-token|@/path/to/token-file]
 
 set -euo pipefail
 
@@ -9,7 +9,20 @@ echo "Deploying Zenos Memory to Vercel..."
 if [ "$#" -eq 0 ]; then
   npx vercel --prod --yes
 else
-  npx vercel --prod --token "$1" --yes
+  token="$1"
+  if [[ "${token}" == @* ]]; then
+    token_file="${token#@}"
+    [[ -r "${token_file}" ]] || {
+      echo "Vercel token file is not readable: ${token_file}" >&2
+      exit 1
+    }
+    token="$(<"${token_file}")"
+  fi
+  [[ -n "${token}" ]] || {
+    echo "Vercel token is empty." >&2
+    exit 1
+  }
+  npx vercel --prod --token "${token}" --yes
 fi
 
 echo "Deployment complete."
