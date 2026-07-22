@@ -11,6 +11,13 @@ test('Gemini compaction reserves reasoning space and retries truncated structure
     fallback: process.env.MEMORY_LLM_FALLBACK_MODEL,
     timeout: process.env.MEMORY_LLM_TIMEOUT_MS,
     total: process.env.MEMORY_LLM_TOTAL_BUDGET_MS,
+    driveFolderId: process.env.ZENOS_MEMORY_DRIVE_FOLDER_ID,
+    driveFolderName: process.env.GOOGLE_DRIVE_FOLDER_NAME,
+    oauthClientId: process.env.GOOGLE_OAUTH_CLIENT_ID,
+    oauthClientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET,
+    oauthRefreshToken: process.env.GOOGLE_OAUTH_REFRESH_TOKEN,
+    serviceAccountKey: process.env.GOOGLE_SERVICE_ACCOUNT_KEY,
+    serviceAccountFile: process.env.GOOGLE_SERVICE_ACCOUNT_FILE,
   };
   process.env.MEMORY_LLM_BASE_URL = 'http://router.test/v1';
   process.env.MEMORY_LLM_API_KEY = 'test-key';
@@ -18,6 +25,18 @@ test('Gemini compaction reserves reasoning space and retries truncated structure
   process.env.MEMORY_LLM_FALLBACK_MODEL = 'ag/gemini-3.5-flash-low';
   process.env.MEMORY_LLM_TIMEOUT_MS = '5000';
   process.env.MEMORY_LLM_TOTAL_BUDGET_MS = '12000';
+  // Vercel injects production Drive credentials into the build environment.
+  // This unit test owns only the mocked LLM transport and must never touch the
+  // real quota ledger or Drive while the production bundle is being verified.
+  for (const key of [
+    'ZENOS_MEMORY_DRIVE_FOLDER_ID',
+    'GOOGLE_DRIVE_FOLDER_NAME',
+    'GOOGLE_OAUTH_CLIENT_ID',
+    'GOOGLE_OAUTH_CLIENT_SECRET',
+    'GOOGLE_OAUTH_REFRESH_TOKEN',
+    'GOOGLE_SERVICE_ACCOUNT_KEY',
+    'GOOGLE_SERVICE_ACCOUNT_FILE',
+  ]) delete process.env[key];
   const calls: Array<{ model: string; max_tokens: number }> = [];
 
   globalThis.fetch = async (_input, init) => {
@@ -68,6 +87,13 @@ test('Gemini compaction reserves reasoning space and retries truncated structure
       MEMORY_LLM_FALLBACK_MODEL: original.fallback,
       MEMORY_LLM_TIMEOUT_MS: original.timeout,
       MEMORY_LLM_TOTAL_BUDGET_MS: original.total,
+      ZENOS_MEMORY_DRIVE_FOLDER_ID: original.driveFolderId,
+      GOOGLE_DRIVE_FOLDER_NAME: original.driveFolderName,
+      GOOGLE_OAUTH_CLIENT_ID: original.oauthClientId,
+      GOOGLE_OAUTH_CLIENT_SECRET: original.oauthClientSecret,
+      GOOGLE_OAUTH_REFRESH_TOKEN: original.oauthRefreshToken,
+      GOOGLE_SERVICE_ACCOUNT_KEY: original.serviceAccountKey,
+      GOOGLE_SERVICE_ACCOUNT_FILE: original.serviceAccountFile,
     })) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
