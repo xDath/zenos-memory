@@ -29,7 +29,14 @@ TOKEN_FILE = Path("/root/.zenos-secrets/vercel-token.txt")
 MEMORY_URL = "https://zenos-memory.vercel.app"
 
 
-def run(command: list[str], *, cwd: Path | None = None, input_text: str | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
+def run(
+    command: list[str],
+    *,
+    cwd: Path | None = None,
+    input_text: str | None = None,
+    check: bool = True,
+    env_overrides: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         cwd=str(cwd) if cwd else None,
@@ -38,7 +45,7 @@ def run(command: list[str], *, cwd: Path | None = None, input_text: str | None =
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=check,
-        env={**os.environ, "NO_COLOR": "1"},
+        env={**os.environ, "NO_COLOR": "1", **(env_overrides or {})},
     )
 
 
@@ -88,8 +95,20 @@ def encrypt_credential(values: dict[str, str], destination: Path, name: str) -> 
 
 
 def vercel_set(project: Path, token: str, name: str, value: str) -> None:
-    run(["npx", "vercel", "env", "rm", name, "production", "--yes", "--token", token], cwd=project, check=False)
-    result = run(["npx", "vercel", "env", "add", name, "production", "--token", token], cwd=project, input_text=value + "\n", check=False)
+    token_env = {"VERCEL_TOKEN": token}
+    run(
+        ["npx", "vercel", "env", "rm", name, "production", "--yes"],
+        cwd=project,
+        check=False,
+        env_overrides=token_env,
+    )
+    result = run(
+        ["npx", "vercel", "env", "add", name, "production"],
+        cwd=project,
+        input_text=value + "\n",
+        check=False,
+        env_overrides=token_env,
+    )
     if result.returncode != 0:
         raise RuntimeError(f"Failed to configure Vercel variable {name}: {result.stderr[-500:]}")
 
@@ -182,7 +201,12 @@ def main() -> int:
         vercel_set(project, token, name, value)
 
     if not args.skip_deploy:
-        result = run(["npx", "vercel", "--prod", "--yes", "--token", token], cwd=project, check=False)
+        result = run(
+            ["npx", "vercel", "--prod", "--yes"],
+            cwd=project,
+            check=False,
+            env_overrides={"VERCEL_TOKEN": token},
+        )
         if result.returncode != 0:
             raise RuntimeError(f"Vercel deployment failed: {result.stderr[-1200:]}")
 

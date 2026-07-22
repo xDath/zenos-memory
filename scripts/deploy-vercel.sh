@@ -22,7 +22,9 @@ else
     echo "Vercel token is empty." >&2
     exit 1
   }
-  npx vercel --prod --token "${token}" --yes
+  export VERCEL_TOKEN="${token}"
+  unset token
+  npx vercel --prod --yes
 fi
 
 echo "Deployment complete."
