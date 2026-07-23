@@ -1871,7 +1871,7 @@ export class MemoryEngine {
     })).digest('hex');
   }
 
-  async resourcePolicyStatus() {
+  async resourcePolicyStatus(options: { includeRemote?: boolean } = {}) {
     const limits = resourceLimits();
     const signingKids = (() => {
       const raw = process.env.ZENOS_MEMORY_SIGNING_KEYS || '';
@@ -1882,7 +1882,8 @@ export class MemoryEngine {
         return raw.split(',').map((entry) => entry.split(':', 1)[0].trim()).filter(Boolean);
       }
     })();
-    const drive = this.cloudMode && this.driveBackup
+    const includeRemote = options.includeRemote === true;
+    const drive = includeRemote && this.cloudMode && this.driveBackup
       ? await Promise.all([
           this.driveBackup.resourceUsage().catch(() => null),
           this.driveBackup.driveStorageQuota().catch(() => null),
@@ -1900,6 +1901,7 @@ export class MemoryEngine {
       },
       usage: drive[0],
       drive_storage: drive[1],
+      remote_probe: includeRemote ? 'requested' : 'deferred_to_resource_policy_endpoint',
       signing: {
         active_kid: process.env.ZENOS_MEMORY_ACTIVE_KID || (signingKids.includes('legacy') ? 'legacy' : signingKids[0] || null),
         accepted_kids: signingKids,

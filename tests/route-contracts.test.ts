@@ -17,6 +17,7 @@ import { POST as bootstrapPost } from '../app/api/memory/bootstrap/route';
 import { POST as compactPost } from '../app/api/memory/compact/route';
 import { POST as cognitiveBriefPost } from '../app/api/memory/cognitive-brief/route';
 import { GET as publicStatusGet } from '../app/api/memory/public-status/route';
+import { GET as resourcePolicyGet } from '../app/api/memory/resource-policy/route';
 import { POST as rememberPost } from '../app/api/memory/remember/route';
 import { POST as resolveConflictPost } from '../app/api/memory/resolve-conflict/route';
 import { POST as revisionPost } from '../app/api/memory/revision/route';
@@ -26,11 +27,11 @@ let directory = '';
 
 function request(
   pathname: string,
-  options: { token?: string; body?: string | Record<string, unknown>; ip?: string; headers?: Record<string, string> } = {},
+  options: { token?: string; body?: string | Record<string, unknown>; ip?: string; headers?: Record<string, string>; method?: string } = {},
 ): NextRequest {
   const body = typeof options.body === 'string' ? options.body : options.body === undefined ? undefined : JSON.stringify(options.body);
   return new NextRequest(`https://memory.test${pathname}`, {
-    method: 'POST',
+    method: options.method || 'POST',
     headers: {
       ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
       ...(options.token ? { authorization: `Bearer ${options.token}` } : {}),
@@ -63,6 +64,12 @@ interface RouteBody {
   request_id?: string;
   revision?: string;
   brief?: { content?: string; sections?: Record<string, unknown> };
+  resource_policy?: {
+    operation_mode?: string;
+    event_pack_mode?: string;
+    remote_probe?: string;
+    signing?: { active_kid?: string | null; accepted_kids?: string[] };
+  };
 }
 
 async function json(response: Response): Promise<RouteBody> {
@@ -331,6 +338,20 @@ test('public status is unauthenticated, no-store, and exposes the stable service
   assert.equal(body.version, '2.5.0');
   assert.equal(body.security?.raw_secret_storage, false);
   assert.equal(body.architecture?.canonical_store?.includes('Google Drive'), true);
+});
+
+test('resource policy status is read-scoped and avoids dashboard-wide work', async () => {
+  const token = issueEtlaToken(secret, { scopes: ['memory:read'], subject: 'resource-policy-test' });
+  const unauthorized = await resourcePolicyGet(request('/api/memory/resource-policy', { method: 'GET' }));
+  assert.equal(unauthorized.status, 401);
+
+  const response = await resourcePolicyGet(request('/api/memory/resource-policy', { method: 'GET', token }));
+  const body = await json(response);
+  assert.equal(response.status, 200);
+  assert.equal(body.success, true);
+  assert.equal(body.resource_policy?.operation_mode, 'opportunistic_free');
+  assert.equal(body.resource_policy?.event_pack_mode, process.env.ZENOS_MEMORY_EVENT_PACK_MODE || 'shadow');
+  assert.equal(body.resource_policy?.remote_probe, 'requested');
 });
 
 test('write routes reject missing tokens and read-only tokens with stable 401 errors', async () => {

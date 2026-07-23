@@ -5,14 +5,18 @@ const EMPTY_SHA256 = crypto.createHash('sha256').update('').digest('hex');
 export class ZenosMemoryClient {
   constructor({
     baseUrl = process.env.ZENOS_MEMORY_URL || 'https://zenos-memory.vercel.app',
-    secret = process.env.ETLA_MASTER_SECRET || process.env.ZENOS_MEMORY_SECRET,
+    secret = process.env.ZENOS_MEMORY_SIGNING_SECRET
+      || process.env.ZENOS_MEMORY_SECRET
+      || process.env.ETLA_MASTER_SECRET,
+    kid = process.env.ZENOS_MEMORY_SIGNING_KID || '',
     namespace = process.env.ZENOS_MEMORY_NAMESPACE || 'zenos',
     clientId = 'zenos-js-sdk',
     timeoutMs = 30_000,
   } = {}) {
-    if (!secret) throw new Error('ZenosMemoryClient requires ETLA_MASTER_SECRET or ZENOS_MEMORY_SECRET');
+    if (!secret) throw new Error('ZenosMemoryClient requires a Memory signing secret');
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.secret = secret;
+    this.kid = String(kid || '').trim();
     this.namespace = namespace;
     this.clientId = clientId;
     this.timeoutMs = timeoutMs;
@@ -24,20 +28,31 @@ export class ZenosMemoryClient {
     const path = '/api/auth';
     const timestamp = Date.now();
     const nonce = crypto.randomBytes(18).toString('base64url');
-    const canonical = [
-      'zenos-memory-signature-v2',
-      timestamp,
-      nonce,
-      method,
-      path,
-      EMPTY_SHA256,
-    ].join('\n');
+    const canonical = this.kid
+      ? [
+          'zenos-memory-signature-v3',
+          this.kid,
+          timestamp,
+          nonce,
+          method,
+          path,
+          EMPTY_SHA256,
+        ].join('\n')
+      : [
+          'zenos-memory-signature-v2',
+          timestamp,
+          nonce,
+          method,
+          path,
+          EMPTY_SHA256,
+        ].join('\n');
     const signature = crypto.createHmac('sha256', this.secret).update(canonical).digest('hex');
     return {
       'x-etla-timestamp': String(timestamp),
       'x-etla-nonce': nonce,
       'x-etla-content-sha256': EMPTY_SHA256,
       'x-etla-signature': signature,
+      ...(this.kid ? { 'x-etla-kid': this.kid, 'x-etla-signature-version': '3' } : {}),
       'x-etla-client-id': this.clientId,
       'x-etla-requested-scopes': scopes.join(' '),
       'content-type': 'application/json',
