@@ -159,6 +159,7 @@ def main() -> int:
     parser.add_argument("--token-file", default=str(TOKEN_FILE))
     parser.add_argument("--kid", default="")
     parser.add_argument("--skip-deploy", action="store_true")
+    parser.add_argument("--deploy-only", action="store_true")
     args = parser.parse_args()
 
     if os.geteuid() != 0:
@@ -167,6 +168,21 @@ def main() -> int:
     token = Path(args.token_file).read_text(encoding="utf-8").strip()
     if not token:
         raise SystemExit("Vercel token file is empty")
+    if args.deploy_only:
+        result = run(
+            ["npx", "vercel", "--prod", "--yes"],
+            cwd=project,
+            check=False,
+            env_overrides={"VERCEL_TOKEN": token},
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Vercel deployment failed: {result.stderr[-1200:]}")
+        print(json.dumps({
+            "ok": True,
+            "mode": "deploy-only",
+            "secret_values_printed": False,
+        }))
+        return 0
 
     runtime_values = decrypt_credential(RUNTIME_CREDENTIAL, "zenos-runtime.env")
     hermes_values = decrypt_credential(HERMES_CREDENTIAL, "hermes-zenos.env")
