@@ -16,6 +16,7 @@ import { resetRateLimitsForTests } from '../app/lib/rate-limit';
 import { POST as bootstrapPost } from '../app/api/memory/bootstrap/route';
 import { POST as compactPost } from '../app/api/memory/compact/route';
 import { POST as cognitiveBriefPost } from '../app/api/memory/cognitive-brief/route';
+import { GET as dashboardGet } from '../app/api/memory/dashboard/route';
 import { GET as publicStatusGet } from '../app/api/memory/public-status/route';
 import { GET as resourcePolicyGet } from '../app/api/memory/resource-policy/route';
 import { POST as rememberPost } from '../app/api/memory/remember/route';
@@ -64,6 +65,12 @@ interface RouteBody {
   request_id?: string;
   revision?: string;
   brief?: { content?: string; sections?: Record<string, unknown> };
+  dashboard?: {
+    mode?: string;
+    memory_count?: number | null;
+    resource_policy?: { remote_probe?: string };
+    analytics_endpoints?: Record<string, string>;
+  };
   resource_policy?: {
     operation_mode?: string;
     event_pack_mode?: string;
@@ -338,6 +345,20 @@ test('public status is unauthenticated, no-store, and exposes the stable service
   assert.equal(body.version, '2.5.0');
   assert.equal(body.security?.raw_secret_storage, false);
   assert.equal(body.architecture?.canonical_store?.includes('Google Drive'), true);
+});
+
+test('dashboard defaults to a bounded serverless summary instead of full materialization', async () => {
+  const token = issueEtlaToken(secret, { scopes: ['memory:read'], subject: 'dashboard-summary-test' });
+  const response = await dashboardGet(request('/api/memory/dashboard?namespace=route-contract', {
+    method: 'GET',
+    token,
+  }));
+  const body = await json(response);
+  assert.equal(response.status, 200);
+  assert.equal(body.dashboard?.mode, 'serverless-control-plane-summary');
+  assert.equal(body.dashboard?.memory_count, null);
+  assert.equal(body.dashboard?.resource_policy?.remote_probe, 'deferred_to_resource_policy_endpoint');
+  assert.equal(body.dashboard?.analytics_endpoints?.stats, '/api/memory/stats');
 });
 
 test('resource policy status is read-scoped and avoids dashboard-wide work', async () => {

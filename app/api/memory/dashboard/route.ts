@@ -13,8 +13,45 @@ export async function GET(request: NextRequest) {
   if (!validateApiKey(request)) return unauthorizedResponse();
   const id = requestId(request);
   try {
-    const namespace = new URL(request.url).searchParams.get('namespace') || 'zenos';
+    const url = new URL(request.url);
+    const namespace = url.searchParams.get('namespace') || 'zenos';
+    const detail = url.searchParams.get('detail') === 'full' ? 'full' : 'summary';
     const engine = getMemoryEngine();
+    const resourcePolicy = await engine.resourcePolicyStatus();
+    if (detail === 'summary') {
+      return jsonResponse({
+        success: true,
+        namespace,
+        dashboard: {
+          mode: 'serverless-control-plane-summary',
+          memory_count: null,
+          by_type: {},
+          data_quality: null,
+          service_readiness: {
+            status: 'operational',
+            architecture: process.env.ZENOS_MEMORY_STORAGE_MODE === 'drive-events'
+              ? 'vercel-compute-drive-event-store'
+              : 'local-sqlite',
+            detailed_probe: '/api/memory/health-check',
+          },
+          resource_policy: resourcePolicy,
+          graph: null,
+          maintenance: null,
+          top_entities: [],
+          recommendations: [
+            'Use ?detail=full for an explicit Drive materialization and complete analytics.',
+            'Use /api/memory/resource-policy for remote quota and durable usage counters.',
+          ],
+          analytics_endpoints: {
+            stats: '/api/memory/stats',
+            quality: '/api/memory/quality',
+            insights: '/api/memory/insights',
+            graph: '/api/memory/relationship-graph',
+          },
+        },
+        request_id: id,
+      }, { requestId: id });
+    }
     const memories = await engine.recall({
       query: '',
       namespace,
@@ -25,10 +62,7 @@ export async function GET(request: NextRequest) {
     const graph = buildTemporalGraph(memories);
     const readiness = productionReadiness(memories);
     const maintenance = buildMaintenanceReport(memories);
-    const [service, resourcePolicy] = await Promise.all([
-      engine.readiness(namespace),
-      engine.resourcePolicyStatus(),
-    ]);
+    const service = await engine.readiness(namespace);
     const byType = memories.reduce<Record<string, number>>((accumulator, memory) => {
       accumulator[memory.type] = (accumulator[memory.type] || 0) + 1;
       return accumulator;
@@ -37,6 +71,7 @@ export async function GET(request: NextRequest) {
       success: true,
       namespace,
       dashboard: {
+        mode: 'full-materialized-analytics',
         memory_count: memories.length,
         by_type: byType,
         data_quality: readiness,
