@@ -14,6 +14,9 @@ test('client signing identities preserve production identities and active signer
     assert.equal(ring?.keys.get('alte'), 'a'.repeat(48));
     assert.equal(ring?.keys.has('invalid'), false);
   } finally {
-    for (const n of names) saved[n] === undefined ? delete process.env[n] : process.env[n] = saved[n];
+    for (const n of names) {
+      if (saved[n] === undefined) delete process.env[n];
+      else process.env[n] = saved[n];
+    }
   }
 });
