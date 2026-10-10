@@ -98,12 +98,20 @@ function parseSigningKeys(raw: string): Map<string, string> {
 
 export function memorySigningKeyring(): MemorySigningKeyring | null {
   const explicitKeys = parseSigningKeys(process.env.ZENOS_MEMORY_SIGNING_KEYS || '');
+  const legacy = process.env.ZENOS_MEMORY_SECRET?.trim() || process.env.ETLA_MASTER_SECRET?.trim();
+  const primaryExplicit = explicitKeys.size > 0;
+  if (!primaryExplicit && legacy) explicitKeys.set('legacy', legacy);
+  const primaryKid = [...explicitKeys.keys()][0];
+  // Additional client identities are provisioned without exposing or replacing
+  // the production keyring. Existing key IDs remain authoritative.
+  for (const [kid, secret] of parseSigningKeys(process.env.ZENOS_MEMORY_CLIENT_SIGNING_KEYS || '')) {
+    if (!explicitKeys.has(kid)) explicitKeys.set(kid, secret);
+  }
   if (explicitKeys.size) {
     const requested = (process.env.ZENOS_MEMORY_ACTIVE_KID || '').trim();
-    const activeKid = requested && explicitKeys.has(requested) ? requested : [...explicitKeys.keys()][0];
-    return { activeKid, keys: explicitKeys, explicit: true };
+    const activeKid = requested && explicitKeys.has(requested) ? requested : primaryKid || [...explicitKeys.keys()][0];
+    return { activeKid, keys: explicitKeys, explicit: primaryExplicit || !legacy };
   }
-  const legacy = process.env.ZENOS_MEMORY_SECRET?.trim() || process.env.ETLA_MASTER_SECRET?.trim();
   if (!legacy) return null;
   return { activeKid: 'legacy', keys: new Map([['legacy', legacy]]), explicit: false };
 }
