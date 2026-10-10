@@ -98,6 +98,11 @@ function parseSigningKeys(raw: string): Map<string, string> {
 
 export function memorySigningKeyring(): MemorySigningKeyring | null {
   const explicitKeys = parseSigningKeys(process.env.ZENOS_MEMORY_SIGNING_KEYS || '');
+  // Additional client identities are provisioned without exposing or replacing
+  // the production keyring. Existing key IDs remain authoritative.
+  for (const [kid, secret] of parseSigningKeys(process.env.ZENOS_MEMORY_CLIENT_SIGNING_KEYS || '')) {
+    if (!explicitKeys.has(kid)) explicitKeys.set(kid, secret);
+  }
   if (explicitKeys.size) {
     const requested = (process.env.ZENOS_MEMORY_ACTIVE_KID || '').trim();
     const activeKid = requested && explicitKeys.has(requested) ? requested : [...explicitKeys.keys()][0];
